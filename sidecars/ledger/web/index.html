@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Token 日历</title>
+  <script src="/preload.js"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" media="print" onload="this.media='all'" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap">
+  <link rel="stylesheet" href="/styles.css">
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      min-height: 100%;
+      background: #F7F4EE;
+      color: #1C1917;
+      scrollbar-width: thin;
+      scrollbar-color: #D8D0C3 transparent;
+    }
+    html[data-theme="dark"], html[data-theme="dark"] body {
+      background: #141311;
+      color: #F2EDE4;
+      scrollbar-color: #302C26 transparent;
+    }
+    html::-webkit-scrollbar, body::-webkit-scrollbar {
+      width: 6px;
+      height: 6px;
+    }
+    html::-webkit-scrollbar-track, body::-webkit-scrollbar-track {
+      background: transparent;
+    }
+    html::-webkit-scrollbar-thumb, body::-webkit-scrollbar-thumb {
+      background: #D8D0C3;
+      border-radius: 999px;
+    }
+    html::-webkit-scrollbar-thumb:hover, body::-webkit-scrollbar-thumb:hover {
+      background: #BFB6A5;
+    }
+    html[data-theme="dark"]::-webkit-scrollbar-thumb, html[data-theme="dark"] body::-webkit-scrollbar-thumb {
+      background: #302C26;
+    }
+    html[data-theme="dark"]::-webkit-scrollbar-thumb:hover, html[data-theme="dark"] body::-webkit-scrollbar-thumb:hover {
+      background: #464037;
+    }
+    @media (prefers-color-scheme: dark) {
+      html:not([data-theme="light"]), html:not([data-theme="light"]) body {
+        background: #141311;
+        color: #F2EDE4;
+        scrollbar-color: #302C26 transparent;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div id="app"></div>
+  <script src="/app.js"></script>
+  <script>
+    (function () {
+      const rootEl = document.getElementById('app');
+
+      async function fetchSnapshot(force) {
+        const fetcher = window.sidecar && typeof window.sidecar.fetch === 'function'
+          ? window.sidecar.fetch
+          : window.fetch.bind(window);
+        const res = await fetcher('/api/ledger' + (force ? '?force=1' : ''), { method: 'GET' });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        return res.json();
+      }
+
+      async function savePrefs(patch) {
+        const fetcher = window.sidecar && typeof window.sidecar.fetch === 'function'
+          ? window.sidecar.fetch
+          : window.fetch.bind(window);
+        const res = await fetcher('/api/prefs', {
+          method: 'POST',
+          body: JSON.stringify(patch || {}),
+        });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        return res.json();
+      }
+
+      const controller = globalThis.mountTokenLedgerApp(rootEl, {
+        mode: 'panel',
+        onLoad: function (force) {
+          return fetchSnapshot(Boolean(force));
+        },
+        onUpdatePrefs: function (patch) {
+          return savePrefs(patch);
+        },
+        onOpenConversation: function (convId) {
+          if (window.sidecar && window.sidecar.ui && typeof window.sidecar.ui.toggleConversation === 'function') {
+            window.sidecar.ui.toggleConversation(convId);
+            return true;
+          }
+          return false;
+        },
+        onThemeResolved: function (theme) {
+          document.documentElement.setAttribute('data-theme', theme);
+          const bg = theme === 'dark' ? '#141311' : '#F7F4EE';
+          const fg = theme === 'dark' ? '#F2EDE4' : '#1C1917';
+          document.documentElement.style.background = bg;
+          if (document.body) {
+            document.body.style.background = bg;
+            document.body.style.color = fg;
+          }
+        },
+      });
+
+      setInterval(function () {
+        if (document.hidden) return;
+        fetchSnapshot(false)
+          .then(function (snap) {
+            controller.updateSnapshot(snap);
+          })
+          .catch(function () {});
+      }, 4500);
+    })();
+  </script>
+</body>
+</html>

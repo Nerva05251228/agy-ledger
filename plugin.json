@@ -1,0 +1,21 @@
+{
+  "name": "agy-ledger",
+  "displayName": "Token Ledger",
+  "version": "1.0.0",
+  "description": "Minimalist token consumption calendar, equivalent API billing statement, cache savings tracker, and model spend analytics.",
+  "author": {
+    "name": "Nerva05251228",
+    "url": "https://github.com/Nerva05251228"
+  },
+  "homepage": "https://github.com/Nerva05251228/agy-ledger",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Nerva05251228/agy-ledger"
+  },
+  "logo": "assets/logo.svg",
+  "suggestedPrompts": [
+    "Show my token consumption and equivalent API bill for this month",
+    "Which conversations and models used the most tokens this week?",
+    "Open the Token Ledger calendar panel"
+  ]
+}
