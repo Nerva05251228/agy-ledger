@@ -824,7 +824,6 @@
                 <button type="button" class="tl-seg-btn ${ui.detailTab === 'chats' ? 'is-active' : ''}" data-action="detail-tab" data-val="chats">${esc(t.tabChats)}</button>
                 <button type="button" class="tl-seg-btn ${ui.detailTab === 'hours' ? 'is-active' : ''}" data-action="detail-tab" data-val="hours">${esc(t.tabHours)}</button>
               </div>
-              <button type="button" class="tl-icon-btn" data-action="close-drawer" aria-label="Close">${ICONS.close}</button>
             </div>
           </div>
           ${bodyHtml}
@@ -1145,10 +1144,6 @@
           ui.detailTab = val;
           render();
         }
-      } else if (action === 'close-drawer') {
-        ui.inspectorScope = null;
-        ui.activeHour = null;
-        render();
       } else if (action === 'hover-hour') {
         const h = Number(btn.getAttribute('data-hour'));
         if (Number.isFinite(h)) {

@@ -13,7 +13,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-export const LEDGER_CLIENT_VERSION = 6;
+export const LEDGER_CLIENT_VERSION = 7;
 const TICK_INTERVAL_MS = 2500;
 const LIST_POLL_CONNECTED_MS = 5000;
 const LIST_POLL_DISCONNECTED_MS = 2500;
@@ -86,7 +86,46 @@ function buildOverlayClientScript(stylesCss) {
       display: inline-flex;
       align-items: center;
       flex-shrink: 0;
+      position: relative;
       font-family: 'Google Sans Flex', 'Plus Jakarta Sans', 'Inter', 'PingFang SC', 'Microsoft YaHei UI', system-ui, sans-serif;
+    }
+    *, *::before, *::after { box-sizing: border-box; }
+    .tl-pill-wrap {
+      display: inline-flex;
+      align-items: center;
+      position: relative;
+      --p-bg: rgba(252, 251, 248, 0.97);
+      --p-border: #DDD6C8;
+      --p-divider: #E9E3D7;
+      --p-track: #EFEBE2;
+      --p-ink: #1C1917;
+      --p-ink-2: #57534E;
+      --p-muted: #8A8277;
+      --p-forest: #1E5E46;
+      --p-copper: #D46B3E;
+      --p-ochre: #C48F2B;
+      --p-olive: #5B753A;
+      --p-umber: #9E3B33;
+      --p-stone: #78716C;
+      --p-hover: rgba(120, 113, 108, 0.12);
+      --p-shadow: 0 8px 26px rgba(28, 25, 23, 0.14), 0 1px 3px rgba(28, 25, 23, 0.06);
+    }
+    .tl-pill-wrap[data-theme="dark"] {
+      --p-bg: rgba(26, 24, 21, 0.97);
+      --p-border: #36312A;
+      --p-divider: #2E2A24;
+      --p-track: #26231E;
+      --p-ink: #F2EDE4;
+      --p-ink-2: #A8A095;
+      --p-muted: #7C756A;
+      --p-forest: #4CC392;
+      --p-copper: #F0A868;
+      --p-ochre: #D9AE5F;
+      --p-olive: #95B869;
+      --p-umber: #DC6E64;
+      --p-stone: #A8A29E;
+      --p-hover: rgba(168, 160, 149, 0.14);
+      --p-shadow: 0 10px 30px rgba(0, 0, 0, 0.48), 0 1px 3px rgba(0, 0, 0, 0.25);
     }
     .tl-pill-main {
       appearance: none;
@@ -95,7 +134,7 @@ function buildOverlayClientScript(stylesCss) {
       border-radius: 999px;
       border: none;
       background: transparent;
-      color: #57534E;
+      color: var(--p-ink-2);
       display: inline-flex;
       align-items: center;
       gap: 5px;
@@ -106,18 +145,11 @@ function buildOverlayClientScript(stylesCss) {
       user-select: none;
       transition: background 120ms ease, color 120ms ease;
     }
+    .tl-pill-wrap[data-open="true"] .tl-pill-main,
     .tl-pill-main:hover,
     .tl-pill-main.is-open {
-      background: rgba(120, 113, 108, 0.12);
-      color: #1C1917;
-    }
-    .tl-pill-main[data-theme="dark"] {
-      color: #A8A095;
-    }
-    .tl-pill-main[data-theme="dark"]:hover,
-    .tl-pill-main[data-theme="dark"].is-open {
-      background: rgba(168, 160, 149, 0.14);
-      color: #F2EDE4;
+      background: var(--p-hover);
+      color: var(--p-ink);
     }
     .tl-pill-main.is-hidden {
       display: none;
@@ -126,17 +158,228 @@ function buildOverlayClientScript(stylesCss) {
       width: 5px;
       height: 5px;
       border-radius: 999px;
-      background: #1E5E46;
+      background: var(--p-forest);
       flex-shrink: 0;
-    }
-    .tl-pill-main[data-theme="dark"] .tl-pill-dot {
-      background: #4CC392;
     }
     .tl-pill-text {
       font-family: 'Google Sans Code', 'JetBrains Mono', 'Cascadia Mono', ui-monospace, monospace;
       font-variant-numeric: tabular-nums;
       font-weight: 500;
       white-space: nowrap;
+    }
+
+    /* Quick-Peek Today Hover Card (mirrors agy-capsule hover bridge mechanics) */
+    .tl-hover-wrap {
+      display: none;
+      position: absolute;
+      bottom: calc(100% + 8px);
+      left: 0;
+      z-index: 2147483635;
+      pointer-events: auto;
+    }
+    .tl-hover-wrap::after {
+      content: "";
+      position: absolute;
+      left: 0;
+      right: 0;
+      bottom: -10px;
+      height: 10px;
+      background: transparent;
+    }
+    .tl-pill-wrap[data-open="true"] .tl-hover-wrap {
+      display: block;
+    }
+    .tl-hover-card {
+      width: 248px;
+      max-width: calc(100vw - 16px);
+      background: var(--p-bg);
+      backdrop-filter: blur(22px);
+      border: 1px solid var(--p-border);
+      border-radius: 11px;
+      padding: 11px 12px;
+      box-shadow: var(--p-shadow);
+      color: var(--p-ink);
+      font-size: 12px;
+      line-height: 1.35;
+      user-select: none;
+      display: flex;
+      flex-direction: column;
+      gap: 9px;
+    }
+    .tl-hc-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+    .tl-hc-title {
+      font-weight: 600;
+      font-size: 12px;
+      color: var(--p-ink);
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .tl-hc-date {
+      font-family: 'Google Sans Code', 'JetBrains Mono', ui-monospace, monospace;
+      font-size: 10.5px;
+      font-weight: 400;
+      color: var(--p-muted);
+    }
+    .tl-hc-turns {
+      font-family: 'Google Sans Code', 'JetBrains Mono', ui-monospace, monospace;
+      font-size: 10.5px;
+      color: var(--p-ink-2);
+      padding: 1px 6px;
+      border-radius: 999px;
+      background: var(--p-track);
+    }
+    .tl-hc-hero {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 8px;
+    }
+    .tl-hc-cost {
+      font-family: 'Google Sans Code', 'JetBrains Mono', ui-monospace, monospace;
+      font-variant-numeric: tabular-nums;
+      font-size: 20px;
+      font-weight: 650;
+      letter-spacing: -0.02em;
+      color: var(--p-ink);
+      line-height: 1.1;
+    }
+    .tl-hc-tok {
+      font-family: 'Google Sans Code', 'JetBrains Mono', ui-monospace, monospace;
+      font-variant-numeric: tabular-nums;
+      font-size: 11.5px;
+      color: var(--p-ink-2);
+    }
+    .tl-hc-sub {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 6px;
+      font-size: 11px;
+      color: var(--p-muted);
+      font-family: 'Google Sans Code', 'JetBrains Mono', ui-monospace, monospace;
+      font-variant-numeric: tabular-nums;
+    }
+    .tl-hc-saved {
+      color: var(--p-forest);
+      font-weight: 500;
+    }
+    .tl-hc-divider {
+      height: 1px;
+      background: var(--p-divider);
+      margin: 0;
+    }
+    .tl-hc-sec {
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+    }
+    .tl-hc-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      font-size: 11.5px;
+    }
+    .tl-hc-lbl {
+      color: var(--p-ink-2);
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+    }
+    .tl-hc-dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 999px;
+      background: var(--p-stone);
+      flex-shrink: 0;
+    }
+    .tl-hc-dot.is-active { background: var(--p-forest); }
+    .tl-hc-dot.is-warn { background: var(--p-ochre); }
+    .tl-hc-dot.c-terracotta { background: var(--p-copper); }
+    .tl-hc-dot.c-forest { background: var(--p-forest); }
+    .tl-hc-dot.c-olive { background: var(--p-olive); }
+    .tl-hc-dot.c-ochre { background: var(--p-ochre); }
+    .tl-hc-dot.c-umber { background: var(--p-umber); }
+    .tl-hc-dot.c-stone { background: var(--p-stone); }
+    .tl-hc-val {
+      font-family: 'Google Sans Code', 'JetBrains Mono', ui-monospace, monospace;
+      font-variant-numeric: tabular-nums;
+      font-weight: 600;
+      color: var(--p-ink);
+    }
+    .tl-hc-bar {
+      height: 4px;
+      border-radius: 999px;
+      background: var(--p-track);
+      overflow: hidden;
+      display: flex;
+      gap: 1px;
+    }
+    .tl-hc-bar-up { background: var(--p-copper); height: 100%; }
+    .tl-hc-bar-down { background: var(--p-forest); height: 100%; }
+    .tl-hc-models {
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+    }
+    .tl-hc-m-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      font-size: 11px;
+    }
+    .tl-hc-m-name {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      color: var(--p-ink-2);
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .tl-hc-m-val {
+      font-family: 'Google Sans Code', 'JetBrains Mono', ui-monospace, monospace;
+      font-variant-numeric: tabular-nums;
+      color: var(--p-ink);
+      flex-shrink: 0;
+    }
+    .tl-hc-m-pct {
+      color: var(--p-muted);
+      margin-left: 3px;
+    }
+    .tl-hc-open-btn {
+      appearance: none;
+      width: 100%;
+      border: none;
+      border-radius: 7px;
+      padding: 5px 8px;
+      background: var(--p-track);
+      color: var(--p-ink-2);
+      font-family: inherit;
+      font-size: 11px;
+      font-weight: 500;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      justify-content: space-between;
+      transition: background 120ms ease, color 120ms ease;
+    }
+    .tl-hc-open-btn:hover {
+      background: var(--p-hover);
+      color: var(--p-ink);
+    }
+    .tl-hc-kbd {
+      font-family: 'Google Sans Code', 'JetBrains Mono', ui-monospace, monospace;
+      font-size: 10px;
+      color: var(--p-muted);
     }
   \`;
 
@@ -226,15 +469,24 @@ function buildOverlayClientScript(stylesCss) {
   pillStyleEl.textContent = PILL_CSS;
   pillShadow.appendChild(pillStyleEl);
 
-  const pillBtn = document.createElement('button');
-  pillBtn.type = 'button';
-  pillBtn.className = 'tl-pill-main is-hidden';
-  pillBtn.setAttribute('data-el', 'pill-open');
-  pillBtn.innerHTML = \`
-    <span class="tl-pill-dot"></span>
-    <span class="tl-pill-text" data-el="pill-text"></span>
+  const pillWrap = document.createElement('div');
+  pillWrap.className = 'tl-pill-wrap';
+  pillWrap.setAttribute('data-open', 'false');
+  pillWrap.setAttribute('data-theme', 'light');
+  pillWrap.innerHTML = \`
+    <button type="button" class="tl-pill-main is-hidden" data-el="pill-open">
+      <span class="tl-pill-dot"></span>
+      <span class="tl-pill-text" data-el="pill-text"></span>
+    </button>
+    <div class="tl-hover-wrap" data-el="hover-wrap">
+      <div class="tl-hover-card" data-el="hover-card"></div>
+    </div>
   \`;
-  pillShadow.appendChild(pillBtn);
+  pillShadow.appendChild(pillWrap);
+
+  const pillBtn = pillShadow.querySelector('[data-el="pill-open"]');
+  const hoverWrapEl = pillShadow.querySelector('[data-el="hover-wrap"]');
+  const hoverCardEl = pillShadow.querySelector('[data-el="hover-card"]');
 
   // 2. Centered Modal Host (mounted directly on document.body)
   const modalHost = document.createElement('div');
@@ -261,6 +513,7 @@ function buildOverlayClientScript(stylesCss) {
   const state = {
     disposed: false,
     modalOpen: false,
+    hoverOpen: false,
     footerWidth: 800,
     snapshot: null,
     pendingPrefsPatch: null,
@@ -322,16 +575,24 @@ function buildOverlayClientScript(stylesCss) {
     return String(Math.round(num));
   }
 
-  function fmtCompactBytes(b) {
+  function escHtml(str) {
+    return String(str ?? '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+
+  function fmtBytesFull(b) {
     const n = Number(b || 0);
-    if (!Number.isFinite(n) || n <= 0) return '';
+    if (!Number.isFinite(n) || n <= 0) return '0 B';
     const KB = 1024;
     const MB = KB * 1024;
     const GB = MB * 1024;
-    if (n >= GB) return (n / GB).toFixed(n >= 10 * GB ? 1 : 2).replace(/\\.00$/, '') + 'GB';
-    if (n >= MB) return (n / MB).toFixed(n >= 100 * MB ? 0 : 1).replace(/\\.0$/, '') + 'MB';
-    if (n >= KB) return (n / KB).toFixed(0) + 'KB';
-    return Math.round(n) + 'B';
+    if (n >= GB) return (n / GB).toFixed(n >= 10 * GB ? 1 : 2).replace(/\\.00$/, '') + ' GB';
+    if (n >= MB) return (n / MB).toFixed(n >= 100 * MB ? 0 : 1).replace(/\\.0$/, '') + ' MB';
+    if (n >= KB) return (n / KB).toFixed(n >= 100 * KB ? 0 : 1).replace(/\\.0$/, '') + ' KB';
+    return Math.round(n) + ' B';
   }
 
   function fmtMoneyShort(usd) {
@@ -339,34 +600,194 @@ function buildOverlayClientScript(stylesCss) {
     return '$' + val.toFixed(2);
   }
 
+  function positionHoverCard() {
+    if (!hoverWrapEl || !state.hoverOpen) return;
+    try {
+      hoverWrapEl.style.left = '';
+      const pr = hoverWrapEl.getBoundingClientRect();
+      if (!pr || pr.width <= 0) return;
+      const vw = window.innerWidth || 1280;
+      const maxRight = vw - 8;
+      if (pr.right > maxRight) {
+        hoverWrapEl.style.left = Math.max(-pr.left + 8, maxRight - pr.right) + 'px';
+      } else if (pr.left < 8) {
+        hoverWrapEl.style.left = (8 - pr.left) + 'px';
+      }
+    } catch {}
+  }
+
+  function renderHoverCard() {
+    const snap = state.snapshot;
+    if (!snap || !hoverCardEl) return;
+    const isEn = snap.prefs?.lang === 'en';
+    const today = snap.today || {};
+    const todayKey = snap.todayKey || '';
+    const dateShort = todayKey ? todayKey.slice(5) : '';
+    const turns = today.turns || 0;
+    const promptTok = (today.uncachedIn || 0) + (today.cachedIn || 0);
+    const hitPct = promptTok > 0 ? ((today.cachedIn / promptTok) * 100).toFixed(0) : '0';
+
+    const up = today.trafficUpBytes || 0;
+    const down = today.trafficDownBytes || 0;
+    const totalNet = today.trafficBytes || 0;
+    const st = snap.trafficStatus || { state: 'idle' };
+    const dotCls = st.state === 'active' ? 'is-active' : st.state === 'admin_required' ? 'is-warn' : '';
+    const netLabel = isEn ? 'Today Traffic' : '今日流量';
+    const netRight =
+      st.state === 'admin_required' && totalNet <= 0
+        ? (isEn ? 'Admin req.' : '需管理员')
+        : fmtBytesFull(totalNet);
+    const upPct = totalNet > 0 ? Math.max(2, (up / totalNet) * 100) : 0;
+    const downPct = totalNet > 0 ? Math.max(2, (down / totalNet) * 100) : 0;
+
+    const todayDay = snap.days?.[todayKey];
+    const topModels = Object.values(todayDay?.byModel || {})
+      .sort((a, b) => b.costUsd - a.costUsd || b.grossTokens - a.grossTokens)
+      .slice(0, 3);
+    const dayCostDenom = Math.max(0.0001, today.costUsd || 0);
+
+    const modelsHtml =
+      topModels.length > 0
+        ? '<div class="tl-hc-divider"></div><div class="tl-hc-models">' +
+          topModels
+            .map((m) => {
+              const share = Math.round((m.costUsd / dayCostDenom) * 100);
+              return (
+                '<div class="tl-hc-m-row">' +
+                '<span class="tl-hc-m-name"><span class="tl-hc-dot c-' +
+                escHtml(m.color || 'stone') +
+                '"></span>' +
+                escHtml(m.shortLabel || m.label) +
+                '</span>' +
+                '<span class="tl-hc-m-val">' +
+                escHtml(fmtMoneyShort(m.costUsd)) +
+                '<span class="tl-hc-m-pct">' +
+                share +
+                '%</span></span></div>'
+              );
+            })
+            .join('') +
+          '</div>'
+        : '';
+
+    hoverCardEl.innerHTML =
+      '<div class="tl-hc-head">' +
+      '<span class="tl-hc-title">' +
+      (isEn ? 'Today' : '今日概览') +
+      (dateShort ? '<span class="tl-hc-date">' + escHtml(dateShort) + '</span>' : '') +
+      '</span>' +
+      '<span class="tl-hc-turns">' +
+      turns +
+      (isEn ? ' reqs' : ' 次') +
+      '</span>' +
+      '</div>' +
+      '<div class="tl-hc-sec">' +
+      '<div class="tl-hc-hero">' +
+      '<span class="tl-hc-cost">' +
+      escHtml(fmtMoneyShort(today.costUsd || 0)) +
+      '</span>' +
+      '<span class="tl-hc-tok">' +
+      escHtml(fmtCompactTok(today.grossTokens || 0)) +
+      ' Tokens</span>' +
+      '</div>' +
+      '<div class="tl-hc-sub">' +
+      '<span>' +
+      (isEn ? 'Cache ' + hitPct + '%' : '缓存命中 ' + hitPct + '%') +
+      '</span>' +
+      '<span class="tl-hc-saved">' +
+      (isEn ? 'Saved ' : '省 ') +
+      escHtml(fmtMoneyShort(today.savedUsd || 0)) +
+      '</span>' +
+      '</div>' +
+      '</div>' +
+      '<div class="tl-hc-divider"></div>' +
+      '<div class="tl-hc-sec">' +
+      '<div class="tl-hc-row">' +
+      '<span class="tl-hc-lbl"><span class="tl-hc-dot ' +
+      dotCls +
+      '"></span>' +
+      netLabel +
+      '</span>' +
+      '<span class="tl-hc-val">' +
+      escHtml(netRight) +
+      '</span>' +
+      '</div>' +
+      (totalNet > 0
+        ? '<div class="tl-hc-bar">' +
+          (up > 0 ? '<div class="tl-hc-bar-up" style="width:' + upPct.toFixed(1) + '%"></div>' : '') +
+          (down > 0 ? '<div class="tl-hc-bar-down" style="width:' + downPct.toFixed(1) + '%"></div>' : '') +
+          '</div>' +
+          '<div class="tl-hc-sub">' +
+          '<span>↑ ' +
+          escHtml(fmtBytesFull(up)) +
+          '</span>' +
+          '<span>↓ ' +
+          escHtml(fmtBytesFull(down)) +
+          '</span>' +
+          '</div>'
+        : '') +
+      '</div>' +
+      modelsHtml +
+      '<button type="button" class="tl-hc-open-btn" data-action="open-modal">' +
+      '<span>' +
+      (isEn ? 'Open Calendar' : '打开完整日历') +
+      '</span>' +
+      '<span class="tl-hc-kbd">Alt+L</span>' +
+      '</button>';
+  }
+
+  let hoverCloseTimer = null;
+  function clearHoverTimer() {
+    if (hoverCloseTimer) {
+      clearTimeout(hoverCloseTimer);
+      hoverCloseTimer = null;
+    }
+  }
+  function setHoverOpen(open) {
+    clearHoverTimer();
+    const next = Boolean(open) && !state.modalOpen && Boolean(state.snapshot);
+    state.hoverOpen = next;
+    pillWrap.setAttribute('data-open', next ? 'true' : 'false');
+    if (next) {
+      renderHoverCard();
+      positionHoverCard();
+    }
+  }
+  function scheduleHoverClose() {
+    clearHoverTimer();
+    hoverCloseTimer = setTimeout(() => {
+      hoverCloseTimer = null;
+      setHoverOpen(false);
+    }, 130);
+  }
+
   function renderChrome() {
     const snap = state.snapshot;
     if (!snap) return;
     const prefs = snap.prefs || {};
+    const hostTheme = detectAgyTheme();
     pillBtn.setAttribute('data-theme', detectAgyTheme());
+    pillWrap.setAttribute('data-theme', hostTheme);
     modalBoxEl.setAttribute('data-theme', resolveModalTheme());
 
     const visible = prefs.widgetVisible !== false;
     pillBtn.classList.toggle('is-hidden', !visible);
     pillBtn.classList.toggle('is-open', state.modalOpen);
+    if (!visible) setHoverOpen(false);
 
     const nextHostStyle = visible
-      ? 'display: inline-flex; align-items: center; flex-shrink: 0; margin: 0 2px;'
+      ? 'display: inline-flex; align-items: center; flex-shrink: 0; margin: 0 2px; position: relative;'
       : 'display: none;';
     if (pillHost.style.cssText !== nextHostStyle) {
       pillHost.style.cssText = nextHostStyle;
     }
 
     const today = snap.today || {};
-    const tok = today.grossTokens || 0;
-    const costStr = fmtMoneyShort(today.costUsd || 0);
-    const netStr = fmtCompactBytes(today.trafficBytes || 0);
-    if (state.footerWidth >= 660 && netStr) {
-      pillTextEl.textContent = costStr + ' · ' + fmtCompactTok(tok) + ' · ' + netStr;
-    } else if (state.footerWidth >= 540) {
-      pillTextEl.textContent = costStr + ' · ' + fmtCompactTok(tok);
-    } else {
-      pillTextEl.textContent = costStr;
+    pillTextEl.textContent = fmtMoneyShort(today.costUsd || 0);
+
+    if (state.hoverOpen) {
+      renderHoverCard();
+      positionHoverCard();
     }
   }
 
@@ -413,7 +834,7 @@ function buildOverlayClientScript(stylesCss) {
     const rightGroup = Array.from(footer.children).find((c) => c !== footerLeft && c !== pillHost) || null;
     const visible = state.snapshot?.prefs?.widgetVisible !== false;
     const nextHostStyle = visible
-      ? 'display: inline-flex; align-items: center; flex-shrink: 0; margin: 0 2px;'
+      ? 'display: inline-flex; align-items: center; flex-shrink: 0; margin: 0 2px; position: relative;'
       : 'display: none;';
     if (pillHost.style.cssText !== nextHostStyle) {
       pillHost.style.cssText = nextHostStyle;
@@ -462,6 +883,7 @@ function buildOverlayClientScript(stylesCss) {
 
   function openModal() {
     if (state.disposed) return;
+    setHoverOpen(false);
     if (document.body && !document.body.contains(modalHost)) {
       document.body.appendChild(modalHost);
     }
@@ -507,8 +929,24 @@ function buildOverlayClientScript(stylesCss) {
     }
   }
 
+  pillWrap.addEventListener('mouseenter', function () {
+    setHoverOpen(true);
+  });
+  pillWrap.addEventListener('mouseleave', function () {
+    scheduleHoverClose();
+  });
+
+  hoverCardEl.addEventListener('click', function (e) {
+    const openBtn = e.target?.closest?.('[data-action="open-modal"]');
+    if (openBtn) {
+      e.stopPropagation();
+      openModal();
+    }
+  });
+
   pillBtn.addEventListener('click', function (e) {
     e.stopPropagation();
+    setHoverOpen(false);
     if (state.modalOpen) closeModal();
     else openModal();
   });
@@ -522,8 +960,9 @@ function buildOverlayClientScript(stylesCss) {
       e.preventDefault();
       if (state.modalOpen) closeModal();
       else openModal();
-    } else if (e.key === 'Escape' && state.modalOpen) {
-      closeModal();
+    } else if (e.key === 'Escape') {
+      if (state.modalOpen) closeModal();
+      else if (state.hoverOpen) setHoverOpen(false);
     }
   }
   window.addEventListener('keydown', onKeyDown, true);
@@ -585,6 +1024,7 @@ function buildOverlayClientScript(stylesCss) {
     },
     dispose() {
       state.disposed = true;
+      clearHoverTimer();
       window.removeEventListener('keydown', onKeyDown, true);
       if (dockRafId && typeof cancelAnimationFrame === 'function') {
         cancelAnimationFrame(dockRafId);

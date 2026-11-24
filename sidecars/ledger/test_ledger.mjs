@@ -147,6 +147,7 @@ function auditUiCopyAndScrollbars() {
     '不含缓存',
     'data-action="currency"',
     'data-action="metric"',
+    'data-action="close-drawer"',
   ];
 
   for (const file of uiFiles) {
@@ -170,6 +171,7 @@ function auditUiCopyAndScrollbars() {
   assert.ok(cdpModal.includes('::-webkit-scrollbar-thumb'), 'Missing custom webkit scrollbar in cdp_modal.mjs');
   assert.ok(cdpModal.includes('scrollbar-color'), 'Missing scrollbar-color in cdp_modal.mjs');
   assert.ok(cdpModal.includes('agy-ledger-pill-host'), 'Missing inline pill host in cdp_modal.mjs');
+  assert.ok(cdpModal.includes('.tl-hover-card'), 'Missing today hover card in cdp_modal.mjs');
   assert.ok(cdpModal.includes('.agy-composer-footer'), 'Missing composer footer docking in cdp_modal.mjs');
   assert.ok(
     cdpModal.includes("pillBtn.setAttribute('data-theme', detectAgyTheme())"),
