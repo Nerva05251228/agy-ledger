@@ -13,7 +13,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-export const LEDGER_CLIENT_VERSION = 5;
+export const LEDGER_CLIENT_VERSION = 6;
 const TICK_INTERVAL_MS = 2500;
 const LIST_POLL_CONNECTED_MS = 5000;
 const LIST_POLL_DISCONNECTED_MS = 2500;
@@ -316,16 +316,27 @@ function buildOverlayClientScript(stylesCss) {
 
   function fmtCompactTok(n) {
     const num = Number(n || 0);
+    if (num >= 1e9) return (num / 1e9).toFixed(2).replace(/\\.00$/, '') + 'B';
     if (num >= 1e6) return (num / 1e6).toFixed(1).replace(/\\.0$/, '') + 'M';
     if (num >= 1e3) return (num / 1e3).toFixed(1).replace(/\\.0$/, '') + 'K';
     return String(Math.round(num));
   }
 
-  function fmtMoneyShort(usd, prefs) {
-    const isCny = prefs?.currency === 'CNY';
-    const val = Number(usd || 0) * (isCny ? Number(prefs?.usdToCny || 7.25) : 1);
-    const sym = isCny ? '¥' : '$';
-    return sym + val.toFixed(2);
+  function fmtCompactBytes(b) {
+    const n = Number(b || 0);
+    if (!Number.isFinite(n) || n <= 0) return '';
+    const KB = 1024;
+    const MB = KB * 1024;
+    const GB = MB * 1024;
+    if (n >= GB) return (n / GB).toFixed(n >= 10 * GB ? 1 : 2).replace(/\\.00$/, '') + 'GB';
+    if (n >= MB) return (n / MB).toFixed(n >= 100 * MB ? 0 : 1).replace(/\\.0$/, '') + 'MB';
+    if (n >= KB) return (n / KB).toFixed(0) + 'KB';
+    return Math.round(n) + 'B';
+  }
+
+  function fmtMoneyShort(usd) {
+    const val = Number(usd || 0);
+    return '$' + val.toFixed(2);
   }
 
   function renderChrome() {
@@ -347,10 +358,16 @@ function buildOverlayClientScript(stylesCss) {
     }
 
     const today = snap.today || {};
-    const isGross = prefs.metricMode !== 'net';
-    const tok = isGross ? today.grossTokens || 0 : today.netTokens || 0;
-    const costStr = fmtMoneyShort(today.costUsd || 0, prefs);
-    pillTextEl.textContent = state.footerWidth >= 560 ? costStr + ' · ' + fmtCompactTok(tok) : costStr;
+    const tok = today.grossTokens || 0;
+    const costStr = fmtMoneyShort(today.costUsd || 0);
+    const netStr = fmtCompactBytes(today.trafficBytes || 0);
+    if (state.footerWidth >= 660 && netStr) {
+      pillTextEl.textContent = costStr + ' · ' + fmtCompactTok(tok) + ' · ' + netStr;
+    } else if (state.footerWidth >= 540) {
+      pillTextEl.textContent = costStr + ' · ' + fmtCompactTok(tok);
+    } else {
+      pillTextEl.textContent = costStr;
+    }
   }
 
   function findVisibleComposerFooter() {

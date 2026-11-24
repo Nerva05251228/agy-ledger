@@ -1,6 +1,8 @@
 /**
  * Minimalist, Progressive-Disclosure Token Calendar UI (`mountTokenLedgerApp`).
  *
+ * Fixed to USD ($) billing and gross tokens (including cached input), with
+ * daily & cumulative AGY OS-process network traffic analytics.
  * First screen shows only the header, 4 clickable summary tiles, and calendar.
  * Clicking any day or summary tile reveals the single-card tabbed detail drawer.
  */
@@ -20,8 +22,6 @@
       loading: '加载中…',
       loadError: '加载失败',
       retry: '重试',
-      gross: '含缓存',
-      net: '不含缓存',
       themeLabel: '主题',
       themeAuto: '跟随系统',
       themeLight: '浅色',
@@ -31,6 +31,11 @@
       pillLabel: '底部胶囊',
       pillOn: '显示',
       pillOff: '隐藏',
+      trafficLabel: '进程流量',
+      trafficActive: '运行中',
+      trafficStarting: '启动中',
+      trafficAdmin: '需管理员',
+      trafficOff: '未启用',
       rateCard: '单价标准',
       refresh: '刷新数据',
       rateUnit: '$ / 1M Tokens',
@@ -46,6 +51,8 @@
       daysShort: '天',
       dailyAvg: (v) => `日均 ${v}`,
       convsSummary: (n) => `${n} 对话`,
+      trafficShort: (v) => `流量 ${v}`,
+      trafficTotalShort: (v) => `总流量 ${v}`,
       cachedSub: '缓存读取',
       hitRate: (pct) => `命中 ${pct}%`,
       tabMonth: '月历',
@@ -66,12 +73,32 @@
       yearPeak: (v) => `最高 ${v}`,
       tabModels: '模型',
       tabTypes: '分类',
+      tabTraffic: '流量',
       tabChats: '对话',
       tabHours: '时段',
       uncachedIn: '普通输入',
       cachedIn: '缓存读取',
       thinkingOut: '思考过程',
       responseOut: '模型回复',
+      trafficUp: '上行上传',
+      trafficDown: '下行下载',
+      trafficSum: '合计流量',
+      trafficEmpty: '该时段暂无流量记录（安装后实时按日累计）',
+      trafficBackendText: (st) => {
+        const b =
+          st.backend === 'win-estats'
+            ? 'Windows 进程 TCP'
+            : st.backend === 'macos-nettop'
+              ? 'macOS nettop'
+              : st.backend === 'linux-ss'
+                ? 'Linux ss'
+                : '系统进程';
+        if (st.state === 'active') return `${b} · 运行中`;
+        if (st.state === 'admin_required') return `${b} · 需管理员权限运行`;
+        if (st.state === 'starting') return `${b} · 启动中`;
+        return `${b} · 未启用`;
+      },
+      trafficMetaCount: (pids, conns) => `${pids} 进程 · ${conns} 连接`,
       noDataPeriod: '暂无记录',
       untitledConv: (id) => `未命名对话 · ${id.slice(0, 6)}`,
       subagentTag: '子任务',
@@ -83,8 +110,6 @@
       loading: 'Loading…',
       loadError: 'Failed to load',
       retry: 'Retry',
-      gross: 'All',
-      net: 'Uncached',
       themeLabel: 'Theme',
       themeAuto: 'System',
       themeLight: 'Light',
@@ -94,6 +119,11 @@
       pillLabel: 'Footer Pill',
       pillOn: 'Show',
       pillOff: 'Hide',
+      trafficLabel: 'Traffic',
+      trafficActive: 'Active',
+      trafficStarting: 'Starting',
+      trafficAdmin: 'Admin req.',
+      trafficOff: 'Idle',
       rateCard: 'Pricing',
       refresh: 'Refresh',
       rateUnit: '$ / 1M Tokens',
@@ -109,6 +139,8 @@
       daysShort: 'd',
       dailyAvg: (v) => `${v}/d`,
       convsSummary: (n) => `${n} chats`,
+      trafficShort: (v) => `Net ${v}`,
+      trafficTotalShort: (v) => `Total ${v}`,
       cachedSub: 'cached',
       hitRate: (pct) => `${pct}% cached`,
       tabMonth: 'Month',
@@ -131,12 +163,32 @@
       yearPeak: (v) => `Peak ${v}`,
       tabModels: 'Models',
       tabTypes: 'Types',
+      tabTraffic: 'Traffic',
       tabChats: 'Chats',
       tabHours: 'Hours',
       uncachedIn: 'Input',
       cachedIn: 'Cached',
       thinkingOut: 'Thinking',
       responseOut: 'Output',
+      trafficUp: 'Upload',
+      trafficDown: 'Download',
+      trafficSum: 'Total',
+      trafficEmpty: 'No traffic recorded for this period yet',
+      trafficBackendText: (st) => {
+        const b =
+          st.backend === 'win-estats'
+            ? 'Windows TCP EStats'
+            : st.backend === 'macos-nettop'
+              ? 'macOS nettop'
+              : st.backend === 'linux-ss'
+                ? 'Linux ss'
+                : 'Process monitor';
+        if (st.state === 'active') return `${b} · Active`;
+        if (st.state === 'admin_required') return `${b} · Run as Administrator`;
+        if (st.state === 'starting') return `${b} · Starting`;
+        return `${b} · Idle`;
+      },
+      trafficMetaCount: (pids, conns) => `${pids} procs · ${conns} conns`,
       noDataPeriod: 'No data',
       untitledConv: (id) => `Untitled · ${id.slice(0, 6)}`,
       subagentTag: 'Subtask',
@@ -162,18 +214,36 @@
     return String(Math.round(num));
   }
 
-  function fmtMoney(usd, prefs, compact) {
-    const isCny = prefs?.currency === 'CNY';
-    const rate = Number(prefs?.usdToCny || 7.25);
-    const val = Number(usd || 0) * (isCny ? rate : 1);
-    const sym = isCny ? '¥' : '$';
-    if (!Number.isFinite(val) || val <= 0) return sym + (compact ? '0' : '0.00');
+  function fmtMoney(usd, compact) {
+    const val = Number(usd || 0);
+    if (!Number.isFinite(val) || val <= 0) return '$' + (compact ? '0' : '0.00');
     if (compact) {
-      if (val >= 100) return sym + Math.round(val);
-      if (val >= 10) return sym + val.toFixed(1);
-      return sym + val.toFixed(2);
+      if (val >= 100) return '$' + Math.round(val);
+      if (val >= 10) return '$' + val.toFixed(1);
+      return '$' + val.toFixed(2);
     }
-    return sym + val.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    return '$' + val.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  }
+
+  function fmtRate(v) {
+    const n = Number(v || 0);
+    if (Math.abs(n * 100 - Math.round(n * 100)) < 1e-6) return '$' + n.toFixed(2);
+    return '$' + n.toFixed(3).replace(/0+$/, '');
+  }
+
+  function fmtBytes(bytes, compact) {
+    const n = Number(bytes || 0);
+    if (!Number.isFinite(n) || n <= 0) return compact ? '0B' : '0 B';
+    const KB = 1024;
+    const MB = KB * 1024;
+    const GB = MB * 1024;
+    const TB = GB * 1024;
+    const sp = compact ? '' : ' ';
+    if (n >= TB) return (n / TB).toFixed(n >= 10 * TB ? 1 : 2).replace(/\.00$/, '') + sp + 'TB';
+    if (n >= GB) return (n / GB).toFixed(n >= 10 * GB ? 1 : 2).replace(/\.00$/, '') + sp + 'GB';
+    if (n >= MB) return (n / MB).toFixed(n >= 100 * MB ? 0 : 1).replace(/\.0$/, '') + sp + 'MB';
+    if (n >= KB) return (n / KB).toFixed(n >= 100 * KB ? 0 : 1).replace(/\.0$/, '') + sp + 'KB';
+    return Math.round(n) + sp + 'B';
   }
 
   function parseLuminance(colorStr) {
@@ -253,7 +323,7 @@
       calTab: 'month', // 'month' | 'year'
       viewMonth: '',
       inspectorScope: null, // null | { type: 'day'|'month'|'all', key: string }
-      detailTab: 'models', // 'models' | 'types' | 'chats' | 'hours'
+      detailTab: 'models', // 'models' | 'types' | 'traffic' | 'chats' | 'hours'
       menuOpen: false,
       showRateCard: false,
       activeHour: null,
@@ -265,9 +335,6 @@
         ui.snapshot?.prefs || {
           lang: 'zh-CN',
           theme: 'auto',
-          metricMode: 'gross',
-          currency: 'USD',
-          usdToCny: 7.25,
           widgetVisible: true,
         }
       );
@@ -342,19 +409,21 @@
     function renderRateCard(t) {
       if (!ui.showRateCard) return '';
       const rows = (ui.snapshot?.rateCard || [])
-        .map(
-          (r) => `
+        .map((r) => {
+          const inStr = r.inRate === r.inLong ? fmtRate(r.inRate) : `${fmtRate(r.inRate)} / ${fmtRate(r.inLong)}`;
+          const outStr = r.outRate === r.outLong ? fmtRate(r.outRate) : `${fmtRate(r.outRate)} / ${fmtRate(r.outLong)}`;
+          return `
           <tr>
             <td>
               <span class="tl-model-name-cell slot-${esc(r.color)}">
                 <span class="tl-dot"></span>${esc(r.label)}
               </span>
             </td>
-            <td class="num tl-num">$${r.inRate.toFixed(2)} / $${r.inLong.toFixed(2)}</td>
-            <td class="num tl-num">$${r.cacheRate.toFixed(3).replace(/0$/, '')}</td>
-            <td class="num tl-num">$${r.outRate.toFixed(2)} / $${r.outLong.toFixed(2)}</td>
-          </tr>`
-        )
+            <td class="num tl-num">${esc(inStr)}</td>
+            <td class="num tl-num">${esc(fmtRate(r.cacheRate))}</td>
+            <td class="num tl-num">${esc(outStr)}</td>
+          </tr>`;
+        })
         .join('');
 
       return `
@@ -382,7 +451,7 @@
         </section>`;
     }
 
-    function renderMonthCalendar(t, prefs, p90) {
+    function renderMonthCalendar(t, p90) {
       const ym = ui.viewMonth;
       const [year, month] = ym.split('-').map(Number);
       const firstDay = new Date(year, month - 1, 1);
@@ -390,7 +459,6 @@
       const daysInMonth = new Date(year, month, 0).getDate();
       const cellCount = Math.ceil((startDow + daysInMonth) / 7) * 7;
       const todayKey = ui.snapshot.todayKey || localDateKey(Date.now());
-      const isGross = prefs.metricMode !== 'net';
 
       const prevYm = shiftMonth(ym, -1);
       const [py, pm] = prevYm.split('-').map(Number);
@@ -421,32 +489,34 @@
 
         const d = ui.snapshot.days?.[cellDate];
         const hasTurns = !isOutside && Boolean(d && d.turns > 0);
-        const level = hasTurns ? computeHeatLevel(d.costUsd, p90) : 0;
+        const hasTraffic = !isOutside && Boolean(d && d.trafficBytes > 0);
+        const hasData = hasTurns || hasTraffic;
+        const level = hasTurns ? computeHeatLevel(d.costUsd, p90) : hasTraffic ? 1 : 0;
         const isToday = cellDate === todayKey;
         const isSelected = selectedDayKey === cellDate;
-        const tokVal = hasTurns ? (isGross ? d.grossTokens : d.netTokens) : 0;
 
         const cls = [
           'tl-cal-cell',
           `heat-${level}`,
           isOutside ? 'is-outside' : '',
-          !hasTurns ? 'is-empty-day' : '',
+          !hasData ? 'is-empty-day' : '',
           isSelected ? 'is-selected' : '',
         ]
           .filter(Boolean)
           .join(' ');
 
         cells.push(`
-          <button type="button" class="${cls}" data-action="select-day" data-date="${esc(cellDate)}" ${hasTurns ? '' : 'data-empty="1"'}>
+          <button type="button" class="${cls}" data-action="select-day" data-date="${esc(cellDate)}" ${hasData ? '' : 'data-empty="1"'}>
             <div class="tl-cell-top">
               <span class="tl-cell-day">${dayNum}</span>
               ${isToday ? '<span class="tl-today-pip"></span>' : ''}
             </div>
             ${
-              hasTurns
+              hasData
                 ? `<div class="tl-cell-metrics">
-                    <span class="tl-cell-bill">${esc(fmtMoney(d.costUsd, prefs, true))}</span>
-                    <span class="tl-cell-tok">${esc(fmtTokens(tokVal))}</span>
+                    ${hasTurns ? `<span class="tl-cell-bill">${esc(fmtMoney(d.costUsd, true))}</span>` : ''}
+                    ${hasTurns ? `<span class="tl-cell-tok">${esc(fmtTokens(d.grossTokens))}</span>` : ''}
+                    ${hasTraffic ? `<span class="tl-cell-net">${esc(fmtBytes(d.trafficBytes, true))}</span>` : ''}
                   </div>`
                 : ''
             }
@@ -487,15 +557,23 @@
         }
         const d = !isFuture ? ui.snapshot.days?.[key] : null;
         const hasTurns = Boolean(d && d.turns > 0);
-        const level = hasTurns ? computeHeatLevel(d.costUsd, p90) : 0;
+        const hasTraffic = Boolean(d && d.trafficBytes > 0);
+        const hasData = hasTurns || hasTraffic;
+        const level = hasTurns ? computeHeatLevel(d.costUsd, p90) : hasTraffic ? 1 : 0;
         const isSelected = selectedDayKey === key;
-        const tip = hasTurns
-          ? `${key} · ${fmtMoney(d.costUsd, prefs, false)} · ${fmtTokens(d.grossTokens)}`
-          : key;
+        const tipParts = [key];
+        if (hasTurns) {
+          tipParts.push(fmtMoney(d.costUsd, false));
+          tipParts.push(fmtTokens(d.grossTokens));
+        }
+        if (hasTraffic) {
+          tipParts.push(fmtBytes(d.trafficBytes, false));
+        }
+        const tip = tipParts.join(' · ');
 
         squares.push(
           `<button type="button" class="tl-hm-sq heat-${level} ${isFuture ? 'is-future' : ''} ${isSelected ? 'is-selected' : ''}"
-            ${isFuture || !hasTurns ? 'data-empty="1"' : ''} ${isFuture ? 'disabled' : ''} data-action="select-day" data-date="${esc(key)}" title="${esc(tip)}"></button>`
+            ${isFuture || !hasData ? 'data-empty="1"' : ''} ${isFuture ? 'disabled' : ''} data-action="select-day" data-date="${esc(key)}" title="${esc(tip)}"></button>`
         );
       }
 
@@ -523,7 +601,7 @@
         </div>`;
     }
 
-    function renderDetailDrawer(t, prefs) {
+    function renderDetailDrawer(t) {
       if (!ui.inspectorScope) return '';
 
       const scope = ui.inspectorScope;
@@ -541,20 +619,74 @@
         periodTitle = t.allTitle;
       }
 
-      const isGross = prefs.metricMode !== 'net';
       const turns = periodData?.turns || 0;
       const grossTok = periodData?.grossTokens || 0;
-      const netTok = periodData?.netTokens || 0;
       const costUsd = periodData?.costUsd || 0;
-      const activeTok = isGross ? grossTok : netTok;
+      const trafficBytes = periodData?.trafficBytes || 0;
+      const trafficUp = periodData?.trafficUpBytes || 0;
+      const trafficDown = periodData?.trafficDownBytes || 0;
 
-      const metaStr =
-        turns > 0
-          ? `${fmtMoney(costUsd, prefs, false)} · ${fmtTokens(activeTok)} · ${turns} ${t.turnsUnit}`
-          : t.noDataPeriod;
+      const metaParts = [];
+      if (turns > 0) {
+        metaParts.push(fmtMoney(costUsd, false));
+        metaParts.push(fmtTokens(grossTok));
+        metaParts.push(`${turns} ${t.turnsUnit}`);
+      }
+      if (trafficBytes > 0) {
+        metaParts.push(fmtBytes(trafficBytes, false));
+      }
+      const metaStr = metaParts.length > 0 ? metaParts.join(' · ') : t.noDataPeriod;
 
       let bodyHtml = '';
-      if (!periodData || turns === 0) {
+      if (ui.detailTab === 'traffic') {
+        const st = ui.snapshot?.trafficStatus || { state: 'idle', backend: '', pidCount: 0, activeConns: 0 };
+        const dotCls = st.state === 'active' ? 'is-active' : st.state === 'admin_required' ? 'is-warn' : '';
+        const statusFoot = `
+          <div class="tl-traffic-foot">
+            <span class="tl-traffic-badge">
+              <span class="tl-status-dot ${dotCls}"></span>
+              <span>${esc(t.trafficBackendText(st))}</span>
+            </span>
+            ${
+              st.state === 'active'
+                ? `<span class="tl-num">${esc(t.trafficMetaCount(st.pidCount || 0, st.activeConns || 0))}</span>`
+                : ''
+            }
+          </div>`;
+
+        if (trafficBytes <= 0) {
+          bodyHtml = `<div class="tl-empty-state">${esc(t.trafficEmpty)}</div>${statusFoot}`;
+        } else {
+          const denom = Math.max(1, trafficBytes);
+          const upPct = ((trafficUp / denom) * 100).toFixed(1);
+          const downPct = ((trafficDown / denom) * 100).toFixed(1);
+          const barSegs = [
+            trafficUp > 0 ? `<div class="tl-seg-up" style="width:${Math.max(1.5, (trafficUp / denom) * 100).toFixed(2)}%"></div>` : '',
+            trafficDown > 0 ? `<div class="tl-seg-down" style="width:${Math.max(1.5, (trafficDown / denom) * 100).toFixed(2)}%"></div>` : '',
+          ].join('');
+
+          bodyHtml = `
+            <div class="tl-stacked-bar">${barSegs}</div>
+            <div class="tl-type-rows">
+              <div class="tl-type-row">
+                <span class="tl-type-label slot-terracotta"><span class="tl-dot"></span><span>${esc(t.trafficUp)}</span></span>
+                <span class="tl-type-tok">${upPct}%</span>
+                <span class="tl-type-cost">${esc(fmtBytes(trafficUp, false))}</span>
+              </div>
+              <div class="tl-type-row">
+                <span class="tl-type-label slot-forest"><span class="tl-dot"></span><span>${esc(t.trafficDown)}</span></span>
+                <span class="tl-type-tok">${downPct}%</span>
+                <span class="tl-type-cost">${esc(fmtBytes(trafficDown, false))}</span>
+              </div>
+              <div class="tl-type-row">
+                <span class="tl-type-label slot-stone"><span class="tl-dot"></span><span>${esc(t.trafficSum)}</span></span>
+                <span class="tl-type-tok">100%</span>
+                <span class="tl-type-cost">${esc(fmtBytes(trafficBytes, false))}</span>
+              </div>
+            </div>
+            ${statusFoot}`;
+        }
+      } else if (!periodData || turns === 0) {
         bodyHtml = `<div class="tl-empty-state">${esc(t.noDataPeriod)}</div>`;
       } else if (ui.detailTab === 'models') {
         const totalCost = Math.max(0.0001, costUsd);
@@ -564,21 +696,20 @@
         bodyHtml = `<div class="tl-rank-list">${models
           .map((m) => {
             const share = ((m.costUsd / totalCost) * 100).toFixed(1);
-            const mTok = isGross ? m.grossTokens : m.netTokens;
             const mPrompt = m.uncachedIn + m.cachedIn;
             const mHit = mPrompt > 0 ? ((m.cachedIn / mPrompt) * 100).toFixed(0) : '0';
             return `
               <div class="tl-model-item slot-${esc(m.color)}">
                 <div class="tl-model-top">
                   <span class="tl-model-name-cell"><span class="tl-dot"></span>${esc(m.label)}</span>
-                  <span class="tl-num" style="font-weight:600">${esc(fmtMoney(m.costUsd, prefs, false))} <span style="color:var(--tl-muted);font-weight:400">${share}%</span></span>
+                  <span class="tl-num" style="font-weight:600">${esc(fmtMoney(m.costUsd, false))} <span style="color:var(--tl-muted);font-weight:400">${share}%</span></span>
                 </div>
                 <div class="tl-progress-track">
                   <div class="tl-progress-fill" style="width:${Math.max(3, Number(share))}%"></div>
                 </div>
                 <div class="tl-model-meta">
                   <span>${m.turns} ${esc(t.turnsUnit)} · ${esc(t.hitRate(mHit))}</span>
-                  <span class="tl-num">${esc(fmtTokens(mTok))}</span>
+                  <span class="tl-num">${esc(fmtTokens(m.grossTokens))}</span>
                 </div>
               </div>`;
           })
@@ -605,7 +736,7 @@
                   <span>${esc(p.label)}</span>
                 </span>
                 <span class="tl-type-tok">${esc(fmtTokens(p.tok))} <span style="opacity:0.6">${share}%</span></span>
-                <span class="tl-type-cost">${esc(fmtMoney(p.cost, prefs, false))}</span>
+                <span class="tl-type-cost">${esc(fmtMoney(p.cost, false))}</span>
               </div>`;
           })
           .join('');
@@ -617,7 +748,6 @@
             ? `<div class="tl-rank-list">${convs
                 .map((c) => {
                   const title = c.title || t.untitledConv(c.convId);
-                  const tok = isGross ? c.grossTokens : c.netTokens;
                   const canOpen = !c.isArchived && typeof adapter.onOpenConversation === 'function';
                   const tag = canOpen ? 'button' : 'div';
                   const attrs = canOpen ? `type="button" data-action="open-conv" data-conv="${esc(c.convId)}"` : '';
@@ -634,22 +764,26 @@
                         </div>
                       </div>
                       <div class="tl-conv-right">
-                        <span class="tl-conv-bill">${esc(fmtMoney(c.costUsd, prefs, false))}</span>
-                        <span class="tl-conv-tok">${esc(fmtTokens(tok))}</span>
+                        <span class="tl-conv-bill">${esc(fmtMoney(c.costUsd, false))}</span>
+                        <span class="tl-conv-tok">${esc(fmtTokens(c.grossTokens))}</span>
                       </div>
                     </${tag}>`;
                 })
                 .join('')}</div>`
             : `<div class="tl-empty-state">${esc(t.noDataPeriod)}</div>`;
       } else {
-        const hourlyTok = (isGross ? periodData.hourlyTokens : periodData.hourlyNetTokens) || new Array(24).fill(0);
+        const hourlyTok = periodData.hourlyTokens || new Array(24).fill(0);
         const hourlyCost = periodData.hourlyCost || new Array(24).fill(0);
+        const hourlyNet = periodData.hourlyTraffic || new Array(24).fill(0);
         const maxHourCost = Math.max(0.0001, ...hourlyCost);
         const peakHour = hourlyCost.reduce((best, val, idx, arr) => (val > arr[best] ? idx : best), 0);
         const inspectHour = ui.activeHour !== null ? ui.activeHour : peakHour;
         const hCost = hourlyCost[inspectHour] || 0;
         const hTok = hourlyTok[inspectHour] || 0;
-        const badgeText = `${String(inspectHour).padStart(2, '0')}:00 · ${fmtMoney(hCost, prefs, false)} · ${fmtTokens(hTok)}`;
+        const hNet = hourlyNet[inspectHour] || 0;
+        const badgeText =
+          `${String(inspectHour).padStart(2, '0')}:00 · ${fmtMoney(hCost, false)} · ${fmtTokens(hTok)}` +
+          (hNet > 0 ? ` · ${fmtBytes(hNet, false)}` : '');
 
         const barsHtml = hourlyCost
           .map((c, h) => {
@@ -686,6 +820,7 @@
               <div class="tl-segmented" role="tablist">
                 <button type="button" class="tl-seg-btn ${ui.detailTab === 'models' ? 'is-active' : ''}" data-action="detail-tab" data-val="models">${esc(t.tabModels)}</button>
                 <button type="button" class="tl-seg-btn ${ui.detailTab === 'types' ? 'is-active' : ''}" data-action="detail-tab" data-val="types">${esc(t.tabTypes)}</button>
+                <button type="button" class="tl-seg-btn ${ui.detailTab === 'traffic' ? 'is-active' : ''}" data-action="detail-tab" data-val="traffic">${esc(t.tabTraffic)}</button>
                 <button type="button" class="tl-seg-btn ${ui.detailTab === 'chats' ? 'is-active' : ''}" data-action="detail-tab" data-val="chats">${esc(t.tabChats)}</button>
                 <button type="button" class="tl-seg-btn ${ui.detailTab === 'hours' ? 'is-active' : ''}" data-action="detail-tab" data-val="hours">${esc(t.tabHours)}</button>
               </div>
@@ -721,15 +856,16 @@
       const snap = ui.snapshot;
       const totals = snap.totals || {};
       const today = snap.today || {};
-      const isGross = prefs.metricMode !== 'net';
+      const trafficSt = snap.trafficStatus || { state: 'idle', backend: '' };
+      const trafficActive = trafficSt.state === 'active';
       const p90 = getP90Cost();
 
       const viewMonthData = snap.months?.[ui.viewMonth] || {
         costUsd: 0,
         grossTokens: 0,
-        netTokens: 0,
         activeDays: 0,
         turns: 0,
+        trafficBytes: 0,
       };
       const monthAvgCost = viewMonthData.activeDays > 0 ? viewMonthData.costUsd / viewMonthData.activeDays : 0;
 
@@ -741,11 +877,22 @@
       const themeLabel =
         prefs.theme === 'light' ? t.themeLight : prefs.theme === 'dark' ? t.themeDark : t.themeAuto;
 
+      const trafficStateText =
+        trafficSt.state === 'active'
+          ? t.trafficActive
+          : trafficSt.state === 'starting'
+            ? t.trafficStarting
+            : trafficSt.state === 'admin_required'
+              ? t.trafficAdmin
+              : t.trafficOff;
+      const trafficDotCls =
+        trafficSt.state === 'active' ? 'is-active' : trafficSt.state === 'admin_required' ? 'is-warn' : '';
+
       const isTodaySelected = ui.inspectorScope?.type === 'day' && ui.inspectorScope.key === todayKey;
       const isMonthSelected = ui.inspectorScope?.type === 'month' && ui.inspectorScope.key === ui.viewMonth;
       const isAllSelected = ui.inspectorScope?.type === 'all';
 
-      const peakStr = totals.peakDay ? fmtMoney(totals.peakDay.costUsd, prefs, false) : '—';
+      const peakStr = totals.peakDay ? fmtMoney(totals.peakDay.costUsd, false) : '—';
 
       const popoverHtml = ui.menuOpen
         ? `<div class="tl-popover">
@@ -760,6 +907,10 @@
             <div class="tl-pop-row">
               <span>${esc(t.pillLabel)}</span>
               <button type="button" class="tl-pill-btn" data-action="toggle-widget">${esc(prefs.widgetVisible !== false ? t.pillOn : t.pillOff)}</button>
+            </div>
+            <div class="tl-pop-row">
+              <span>${esc(t.trafficLabel)}</span>
+              <span class="tl-pop-status"><span class="tl-status-dot ${trafficDotCls}"></span>${esc(trafficStateText)}</span>
             </div>
             <div class="tl-pop-divider"></div>
             <div class="tl-pop-actions">
@@ -787,19 +938,15 @@
               <span class="tl-streak-item">${esc(t.yearPeak(peakStr))}</span>
             </div>`;
 
+      const showTodayTraffic = (today.trafficBytes || 0) > 0 || trafficActive;
+      const showMonthTraffic = (viewMonthData.trafficBytes || 0) > 0;
+      const showTotalTraffic = (totals.trafficBytes || 0) > 0 || trafficActive;
+
       root.innerHTML = `
         <div class="tl-shell">
           <header class="tl-masthead">
             <h1 class="tl-brand-title">${esc(t.title)}</h1>
             <div class="tl-header-actions">
-              <div class="tl-segmented" role="group">
-                <button type="button" class="tl-seg-btn ${prefs.currency !== 'CNY' ? 'is-active' : ''}" data-action="currency" data-val="USD">$</button>
-                <button type="button" class="tl-seg-btn ${prefs.currency === 'CNY' ? 'is-active' : ''}" data-action="currency" data-val="CNY">¥</button>
-              </div>
-              <div class="tl-segmented" role="group">
-                <button type="button" class="tl-seg-btn ${isGross ? 'is-active' : ''}" data-action="metric" data-val="gross">${esc(t.gross)}</button>
-                <button type="button" class="tl-seg-btn ${!isGross ? 'is-active' : ''}" data-action="metric" data-val="net">${esc(t.net)}</button>
-              </div>
               <div class="tl-pop-wrap">
                 <button type="button" class="tl-icon-btn ${ui.menuOpen ? 'is-active' : ''}" data-action="toggle-menu" aria-label="Settings">${ICONS.gear}</button>
                 ${popoverHtml}
@@ -820,9 +967,14 @@
                 <span>${esc(t.kpiToday)}</span>
                 <span class="tl-kpi-tag">${today.turns || 0} ${esc(t.turnsUnit)}</span>
               </div>
-              <div class="tl-kpi-value">${esc(fmtMoney(today.costUsd, prefs, false))}</div>
+              <div class="tl-kpi-value">${esc(fmtMoney(today.costUsd, false))}</div>
               <div class="tl-kpi-sub tl-num">
-                <span>${esc(fmtTokens(isGross ? today.grossTokens : today.netTokens))} Tokens</span>
+                <span>${esc(fmtTokens(today.grossTokens))} Tokens</span>
+                ${
+                  showTodayTraffic
+                    ? `<span>·</span><span>${esc(t.trafficShort(fmtBytes(today.trafficBytes || 0, false)))}</span>`
+                    : ''
+                }
               </div>
             </button>
 
@@ -831,11 +983,16 @@
                 <span>${esc(t.kpiMonth)}</span>
                 <span class="tl-kpi-tag">${viewMonthData.activeDays || 0} ${esc(t.daysShort)}</span>
               </div>
-              <div class="tl-kpi-value">${esc(fmtMoney(viewMonthData.costUsd, prefs, false))}</div>
+              <div class="tl-kpi-value">${esc(fmtMoney(viewMonthData.costUsd, false))}</div>
               <div class="tl-kpi-sub tl-num">
-                <span>${esc(fmtTokens(isGross ? viewMonthData.grossTokens : viewMonthData.netTokens))}</span>
+                <span>${esc(fmtTokens(viewMonthData.grossTokens))}</span>
                 <span>·</span>
-                <span>${esc(t.dailyAvg(fmtMoney(monthAvgCost, prefs, true)))}</span>
+                <span>${esc(t.dailyAvg(fmtMoney(monthAvgCost, true)))}</span>
+                ${
+                  showMonthTraffic
+                    ? `<span>·</span><span>${esc(fmtBytes(viewMonthData.trafficBytes || 0, false))}</span>`
+                    : ''
+                }
               </div>
             </button>
 
@@ -844,11 +1001,16 @@
                 <span>${esc(t.kpiAllTime)}</span>
                 <span class="tl-kpi-tag">${totals.activeDays || 0} ${esc(t.daysShort)}</span>
               </div>
-              <div class="tl-kpi-value">${esc(fmtMoney(totals.costUsd, prefs, false))}</div>
+              <div class="tl-kpi-value">${esc(fmtMoney(totals.costUsd, false))}</div>
               <div class="tl-kpi-sub tl-num">
-                <span>${esc(fmtTokens(isGross ? totals.grossTokens : totals.netTokens))}</span>
+                <span>${esc(fmtTokens(totals.grossTokens))}</span>
                 <span>·</span>
                 <span>${esc(t.convsSummary(totals.conversations || 0))}</span>
+                ${
+                  showTotalTraffic
+                    ? `<span>·</span><span>${esc(t.trafficTotalShort(fmtBytes(totals.trafficBytes || 0, false)))}</span>`
+                    : ''
+                }
               </div>
             </button>
 
@@ -857,7 +1019,7 @@
                 <span>${esc(t.kpiSavings)}</span>
                 <span class="tl-kpi-tag is-good">${esc(t.hitRate(allHitPct))}</span>
               </div>
-              <div class="tl-kpi-value">${esc(fmtMoney(totals.savedUsd, prefs, false))}</div>
+              <div class="tl-kpi-value">${esc(fmtMoney(totals.savedUsd, false))}</div>
               <div class="tl-kpi-sub tl-num">
                 <span>${esc(fmtTokens(totals.cachedIn || 0))} ${esc(t.cachedSub)}</span>
               </div>
@@ -873,10 +1035,10 @@
               </div>
             </div>
 
-            ${ui.calTab === 'month' ? renderMonthCalendar(t, prefs, p90) : renderYearHeatmap(t, prefs, p90)}
+            ${ui.calTab === 'month' ? renderMonthCalendar(t, p90) : renderYearHeatmap(t, prefs, p90)}
           </section>
 
-          ${renderDetailDrawer(t, prefs)}
+          ${renderDetailDrawer(t)}
         </div>`;
     }
 
@@ -897,13 +1059,7 @@
         ui.menuOpen = false;
       }
 
-      if (action === 'metric') {
-        const val = btn.getAttribute('data-val');
-        if (val === 'gross' || val === 'net') patchPrefs({ metricMode: val });
-      } else if (action === 'currency') {
-        const val = btn.getAttribute('data-val');
-        if (val === 'USD' || val === 'CNY') patchPrefs({ currency: val });
-      } else if (action === 'toggle-menu') {
+      if (action === 'toggle-menu') {
         ui.menuOpen = !ui.menuOpen;
         render();
       } else if (action === 'close-modal') {
@@ -985,7 +1141,7 @@
         render();
       } else if (action === 'detail-tab') {
         const val = btn.getAttribute('data-val');
-        if (['models', 'types', 'chats', 'hours'].includes(val)) {
+        if (['models', 'types', 'traffic', 'chats', 'hours'].includes(val)) {
           ui.detailTab = val;
           render();
         }
@@ -1015,8 +1171,6 @@
       ui.activeHour = h;
       const badgeEl = root.querySelector('[data-el="hour-badge"]');
       if (badgeEl && ui.snapshot && ui.inspectorScope) {
-        const prefs = getPrefs();
-        const isGross = prefs.metricMode !== 'net';
         const scope = ui.inspectorScope;
         const periodData =
           scope.type === 'day'
@@ -1025,9 +1179,13 @@
               ? ui.snapshot.months?.[scope.key]
               : ui.snapshot.totals;
         if (periodData) {
-          const hourlyTok = (isGross ? periodData.hourlyTokens : periodData.hourlyNetTokens) || [];
+          const hourlyTok = periodData.hourlyTokens || [];
           const hourlyCost = periodData.hourlyCost || [];
-          badgeEl.textContent = `${String(h).padStart(2, '0')}:00 · ${fmtMoney(hourlyCost[h] || 0, prefs, false)} · ${fmtTokens(hourlyTok[h] || 0)}`;
+          const hourlyNet = periodData.hourlyTraffic || [];
+          const hNet = hourlyNet[h] || 0;
+          badgeEl.textContent =
+            `${String(h).padStart(2, '0')}:00 · ${fmtMoney(hourlyCost[h] || 0, false)} · ${fmtTokens(hourlyTok[h] || 0)}` +
+            (hNet > 0 ? ` · ${fmtBytes(hNet, false)}` : '');
         }
       }
     });

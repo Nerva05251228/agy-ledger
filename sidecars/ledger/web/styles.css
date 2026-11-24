@@ -559,7 +559,7 @@
   appearance: none;
   font-family: inherit;
   text-align: left;
-  min-height: 60px;
+  min-height: 66px;
   padding: 6px 6px 5px;
   border-radius: 10px;
   border: 1px solid transparent;
@@ -568,7 +568,7 @@
   display: flex;
   flex-direction: column;
   justify-content: space-between;
-  gap: 4px;
+  gap: 3px;
   cursor: pointer;
   transition: transform 110ms ease, border-color 110ms ease, box-shadow 110ms ease;
   overflow: hidden;
@@ -657,6 +657,17 @@
   font-size: 10px;
   line-height: 1.1;
   opacity: 0.78;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tl-cell-net {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums lining-nums;
+  font-size: 9.5px;
+  line-height: 1.1;
+  opacity: 0.72;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -871,6 +882,53 @@
 .tl-seg-cached { background: var(--tl-forest); }
 .tl-seg-thinking { background: var(--tl-ochre-mid); }
 .tl-seg-response { background: var(--tl-olive); }
+.tl-seg-up { background: var(--tl-copper-mid); }
+.tl-seg-down { background: var(--tl-forest); }
+
+.tl-traffic-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 7px 10px;
+  border-radius: 8px;
+  background: var(--tl-elevated);
+  border: 1px solid var(--tl-border);
+  font-size: 11px;
+  color: var(--tl-ink-2);
+}
+
+.tl-traffic-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.tl-status-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--tl-stone);
+  flex-shrink: 0;
+}
+
+.tl-status-dot.is-active {
+  background: var(--tl-forest);
+}
+
+.tl-status-dot.is-warn {
+  background: var(--tl-ochre-mid);
+}
+
+.tl-pop-status {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--tl-ink-2);
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
 
 .tl-type-rows {
   display: flex;
@@ -1112,8 +1170,8 @@ button.tl-conv-row:hover {
   }
 
   .tl-cal-cell {
-    min-height: 76px;
-    padding: 8px 8px 6px;
+    min-height: 82px;
+    padding: 7px 8px 6px;
   }
 
   .tl-cell-bill {
@@ -1122,5 +1180,9 @@ button.tl-conv-row:hover {
 
   .tl-cell-tok {
     font-size: 10.5px;
+  }
+
+  .tl-cell-net {
+    font-size: 10px;
   }
 }

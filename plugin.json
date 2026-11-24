@@ -1,8 +1,8 @@
 {
   "name": "agy-ledger",
   "displayName": "Token Ledger",
-  "version": "1.0.0",
-  "description": "Minimalist token consumption calendar, equivalent API billing statement, cache savings tracker, and model spend analytics.",
+  "version": "1.1.0",
+  "description": "Minimalist token consumption calendar, equivalent API billing statement, cache savings tracker, model spend analytics, and OS-level AGY process network traffic monitor.",
   "author": {
     "name": "Nerva05251228",
     "url": "https://github.com/Nerva05251228"

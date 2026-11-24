@@ -1,11 +1,11 @@
 ---
 name: token-ledger
-description: Query local Antigravity token consumption, daily calendar usage, Prompt Cache savings, and equivalent API billing statements, or open the Token Ledger visual dashboard in the auxiliary pane. Use when the user asks about their token usage, API cost equivalent, daily/monthly spend, cache hit savings, or top token-consuming models/conversations.
+description: Query local Antigravity token consumption, daily calendar usage, Prompt Cache savings, equivalent USD API billing statements, and OS-level AGY network traffic, or open the Token Ledger visual dashboard in the auxiliary pane. Use when the user asks about their token usage, API cost equivalent, daily/monthly spend, cache hit savings, AGY network traffic, or top token-consuming models/conversations.
 ---
 
 # Token Ledger
 
-Use this skill when the user wants to inspect their token consumption, daily/monthly calendar stats, equivalent API billing statement, or open the visual dashboard.
+Use this skill when the user wants to inspect their token consumption, daily/monthly calendar stats, equivalent USD API billing statement, AGY network traffic (daily & total), or open the visual dashboard.
 
 ## Open the Visual Dashboard
 
@@ -19,7 +19,7 @@ Users can also toggle the main-window modal anytime with `Alt+L` or by clicking 
 
 ## Querying Exact Numbers in Chat
 
-Run the collector CLI from the plugin directory to get a live JSON summary (reads local Antigravity SQLite databases in read-only mode):
+Run the collector CLI from the plugin directory to get a live JSON summary (reads local Antigravity SQLite databases in read-only mode and merges persisted OS-process traffic stats):
 
 ```bash
 node --no-warnings "$HOME/.gemini/config/plugins/agy-ledger/sidecars/ledger/collector.mjs" --summary
@@ -31,6 +31,6 @@ Optional flags:
 - `--date YYYY-MM-DD` — include detailed breakdown for a specific local date.
 
 Present numbers clearly with:
-1. Equivalent API bill (`costUsd` / CNY) and Prompt Cache savings (`savedUsd`, cache hit rate %).
-2. All tokens (incl. cache reads) vs. uncached + output tokens.
+1. Equivalent USD API bill (`costUsd`) and Prompt Cache savings (`savedUsd`, cache hit rate %).
+2. Total tokens including cache (`grossTokens`) and AGY network traffic (`trafficBytes`, upload/download split) when recorded.
 3. Per-model and top-conversation breakdown when relevant.

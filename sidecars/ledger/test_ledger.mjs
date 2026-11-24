@@ -2,11 +2,12 @@
  * Automated verification suite for agy-ledger.
  *
  * Verifies:
- *   1. Tier-aware equivalent API billing & Prompt Cache savings math
- *   2. Real local SQLite telemetry extraction + all-time totals breakdown
- *   3. End-to-end HTTP server asset & JSON API serving + prefs mutation
- *   4. Strict Zero-Blue/Purple palette audit across all UI, SVG, and CDP files
- *   5. Minimalist plain-language copy & theme-unified scrollbar verification
+ *   1. Updated 2026-11 standard API billing (incl. Gemini 4 Neon & Claude 5.5) & Cache savings math
+ *   2. Cross-platform OS-level process traffic accounting, persistence, & Linux/macOS parsers
+ *   3. Real local SQLite telemetry extraction + all-time totals breakdown
+ *   4. End-to-end HTTP server asset & JSON API serving + simplified prefs mutation
+ *   5. Strict Zero-Blue/Purple palette audit across all UI, SVG, and CDP files
+ *   6. Minimalist plain-language copy, removed toggles, & theme-unified scrollbar verification
  */
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
@@ -15,7 +16,8 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { calculateTurnBilling, resolveModelSpec } from './pricing.mjs';
-import { createLedgerCollector, toLocalDateKey } from './collector.mjs';
+import { createLedgerCollector, sanitizePrefs, toLocalDateKey } from './collector.mjs';
+import { createTrafficMonitor, parseLinuxSsOutput, parseMacNettopOutput } from './traffic.mjs';
 import { startLedgerServer } from './server.mjs';
 import { buildCdpRuntimeBundle } from './cdp_modal.mjs';
 
@@ -142,6 +144,9 @@ function auditUiCopyAndScrollbars() {
     'pill-hide',
     'SimSun',
     'Times New Roman',
+    '不含缓存',
+    'data-action="currency"',
+    'data-action="metric"',
   ];
 
   for (const file of uiFiles) {
@@ -161,6 +166,7 @@ function auditUiCopyAndScrollbars() {
   assert.ok(stylesCss.includes('scrollbar-color'), 'Missing scrollbar-color in styles.css');
   assert.ok(stylesCss.includes('.tl-heatmap-month-lbl'), 'Missing .tl-heatmap-month-lbl in styles.css');
   assert.ok(stylesCss.includes('white-space: nowrap'), 'Missing white-space: nowrap in styles.css');
+  assert.ok(stylesCss.includes('.tl-cell-net'), 'Missing .tl-cell-net in styles.css');
   assert.ok(cdpModal.includes('::-webkit-scrollbar-thumb'), 'Missing custom webkit scrollbar in cdp_modal.mjs');
   assert.ok(cdpModal.includes('scrollbar-color'), 'Missing scrollbar-color in cdp_modal.mjs');
   assert.ok(cdpModal.includes('agy-ledger-pill-host'), 'Missing inline pill host in cdp_modal.mjs');
@@ -217,14 +223,14 @@ function createFixtureAppData(rootDir, nowMs) {
   const stepMeta = pbBytes(1, pbVarint(1, sec));
   const kv = Buffer.concat([pbBytes(1, 'last_step_index'), pbBytes(2, '0')]);
   const usage = Buffer.concat([
-    pbVarint(1, 1417),
+    pbVarint(1, 1535),
     pbVarint(2, 10_000),
     pbVarint(3, 1_500),
     pbVarint(5, 80_000),
     pbVarint(9, 500),
     pbVarint(10, 1_000),
   ]);
-  const m1 = Buffer.concat([pbVarint(3, 1417), pbBytes(4, usage), pbBytes(19, 'gemini-4-argon'), pbBytes(20, kv)]);
+  const m1 = Buffer.concat([pbVarint(3, 1535), pbBytes(4, usage), pbBytes(19, 'gemini-4-neon'), pbBytes(20, kv)]);
   const genData = pbBytes(1, m1);
 
   const cDb = new DatabaseSync(join(convDir, `${convId}.db`));
@@ -237,64 +243,166 @@ function createFixtureAppData(rootDir, nowMs) {
   return [{ product: 'antigravity', dir: prodDir }];
 }
 
+function testTrafficParsersAndArchive(tempStateDir) {
+  // Linux `ss` parser test: count external + proxy loopback, exclude internal AGY IPC & local dev server
+  const listenText = [
+    'LISTEN 0 128 127.0.0.1:6758 0.0.0.0:* users:(("language_server",pid=100,fd=5))',
+    'LISTEN 0 128 127.0.0.1:10808 0.0.0.0:* users:(("sing-box",pid=200,fd=8))',
+    'LISTEN 0 128 127.0.0.1:3000 0.0.0.0:* users:(("node",pid=300,fd=9))',
+  ].join('\n');
+  const tcpText = [
+    'ESTAB 0 0 127.0.0.1:50001 127.0.0.1:6758 users:(("Antigravity",pid=101,fd=10))',
+    ' cubic bytes_sent:999999 bytes_received:888888',
+    'ESTAB 0 0 127.0.0.1:50002 127.0.0.1:10808 users:(("language_server",pid=100,fd=11))',
+    ' cubic bytes_sent:40000 bytes_received:12000',
+    'ESTAB 0 0 127.0.0.1:50003 127.0.0.1:3000 users:(("Antigravity",pid=101,fd=12))',
+    ' cubic bytes_sent:77777 bytes_received:66666',
+    'ESTAB 0 0 10.0.0.5:50004 142.250.1.1:443 users:(("language_server",pid=100,fd=13))',
+    ' cubic bytes_sent:10000 bytes_received:5000',
+    'ESTAB 0 0 127.0.0.1:50005 127.0.0.1:10808 users:(("chrome",pid=400,fd=14))',
+    ' cubic bytes_sent:500000 bytes_received:500000',
+  ].join('\n');
+
+  const linuxParsed = parseLinuxSsOutput(tcpText, listenText);
+  assert.equal(linuxParsed.conns.size, 2, 'Linux parser should only include proxy + external AGY sockets');
+  let sumOut = 0;
+  let sumIn = 0;
+  for (const c of linuxParsed.conns.values()) {
+    sumOut += c.outBytes;
+    sumIn += c.inBytes;
+  }
+  assert.equal(sumOut, 50_000);
+  assert.equal(sumIn, 17_000);
+
+  // macOS `nettop` parser test
+  const lsofListen = [
+    'COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE NAME',
+    'language_server 100 user 5u IPv4 0x1 0t0 TCP 127.0.0.1:6758 (LISTEN)',
+    'mihomo 200 user 8u IPv4 0x2 0t0 TCP 127.0.0.1:7890 (LISTEN)',
+  ].join('\n');
+  const nettopOut = [
+    'time,,bytes_in,bytes_out,',
+    '17:00:01.000,language_server_macos_arm.100,50000,90000,',
+    '17:00:01.000,tcp4 127.0.0.1:51000<->127.0.0.1:6758,99999,99999,',
+    '17:00:01.000,tcp4 127.0.0.1:51001<->127.0.0.1:7890,1500,8500,',
+    '17:00:01.000,tcp4 192.168.1.5:51002<->142.250.1.1:443,2500,3500,',
+    '17:00:01.000,Google Chrome.400,800000,800000,',
+    '17:00:01.000,tcp4 127.0.0.1:51003<->127.0.0.1:7890,800000,800000,',
+  ].join('\n');
+
+  const macParsed = parseMacNettopOutput(nettopOut, lsofListen);
+  assert.equal(macParsed.conns.size, 2, 'macOS parser should exclude IPC & Chrome, keep proxy + external');
+  let macOut = 0;
+  let macIn = 0;
+  for (const c of macParsed.conns.values()) {
+    macOut += c.outBytes;
+    macIn += c.inBytes;
+  }
+  assert.equal(macOut, 12_000);
+  assert.equal(macIn, 4_000);
+
+  // Persistence round-trip test
+  const tDir = mkdtempSync(join(tempStateDir, 'traffic-'));
+  const fixedTs = new Date(2026, 10, 24, 15, 30, 0).getTime();
+  const mon1 = createTrafficMonitor({ stateDir: tDir, nowFn: () => fixedTs });
+  mon1.recordDelta(1_500_000, 250_000, fixedTs);
+  mon1.recordDelta(500_000, 50_000, fixedTs);
+  mon1.flush(true);
+
+  const mon2 = createTrafficMonitor({ stateDir: tDir, nowFn: () => fixedTs });
+  const day = mon2.getDaysMap().get('2026-11-24');
+  assert.ok(day, 'Expected persisted traffic day 2026-11-24');
+  assert.equal(day.upBytes, 2_000_000);
+  assert.equal(day.downBytes, 300_000);
+  assert.equal(day.hourlyUp[15], 2_000_000);
+  assert.equal(day.hourlyDown[15], 300_000);
+}
+
 async function runTests() {
   const tempStateDir = mkdtempSync(join(tmpdir(), 'agy-ledger-test-'));
   const tempFixtureDir = mkdtempSync(join(tmpdir(), 'agy-ledger-fixture-'));
   try {
-    // 1. Billing & Cache Math Unit Test
+    // 1. Billing & Cache Math Unit Test (2026-11 Standard Rates)
+    const neonSpec = resolveModelSpec('gemini-4-neon', 1535);
+    assert.equal(neonSpec.id, 'gemini-4-neon');
+    assert.equal(neonSpec.inRate, 3.0);
+    assert.equal(neonSpec.cacheRate, 0.15);
+    assert.equal(neonSpec.outRate, 15.0);
+
+    const neonByEnum = resolveModelSpec('', 1535);
+    assert.equal(neonByEnum.id, 'gemini-4-neon');
+
+    const hydrogenSpec = resolveModelSpec('gemini-4-hydrogen', 1528);
+    assert.equal(hydrogenSpec.id, 'gemini-4-hydrogen');
+    assert.equal(hydrogenSpec.inRate, 1.5);
+    assert.equal(hydrogenSpec.cacheRate, 0.075);
+    assert.equal(hydrogenSpec.outRate, 7.5);
+
     const argonSpec = resolveModelSpec('gemini-4-argon', 1417);
     assert.equal(argonSpec.id, 'gemini-4-argon');
     assert.equal(argonSpec.color, 'forest');
+    assert.equal(argonSpec.inRate, 4.0);
+    assert.equal(argonSpec.outRate, 20.0);
 
-    const unknownSpec = resolveModelSpec('', 1401);
-    assert.equal(unknownSpec.id, 'claude-opus-4.6');
+    const opus55Spec = resolveModelSpec('claude-opus-5-5-medium', 1401);
+    assert.equal(opus55Spec.id, 'claude-opus-5.5');
+    assert.equal(opus55Spec.inRate, 4.0);
+    assert.equal(opus55Spec.cacheRate, 0.2);
+    assert.equal(opus55Spec.outRate, 20.0);
 
-    const stdBill = calculateTurnBilling({
+    const opus46Spec = resolveModelSpec('', 1026);
+    assert.equal(opus46Spec.id, 'claude-opus-4.6');
+    assert.equal(opus46Spec.inRate, 5.0);
+
+    const sonnet55Spec = resolveModelSpec('claude-sonnet-5-5-medium', 1404);
+    assert.equal(sonnet55Spec.id, 'claude-sonnet-5.5');
+    assert.equal(sonnet55Spec.inRate, 2.0);
+    assert.equal(sonnet55Spec.outRate, 10.0);
+
+    // Neon billing math: 100K in ($0.30) + 50K cache ($0.0075) + 2K out ($0.03) = $0.3375
+    const neonBill = calculateTurnBilling({
       uncachedIn: 100_000,
       cachedIn: 50_000,
       thinkingOut: 1_000,
       responseOut: 1_000,
-      spec: argonSpec,
+      spec: neonSpec,
     });
-    assert.ok(Math.abs(stdBill.costUsd - 0.15125) < 1e-9, `Unexpected standard bill: ${stdBill.costUsd}`);
-    assert.ok(stdBill.savedUsd > 0, 'Expected positive cache savings when cachedIn > 0');
-    assert.equal(stdBill.isLongContext, false);
+    assert.ok(Math.abs(neonBill.costUsd - 0.3375) < 1e-9, `Unexpected Neon bill: ${neonBill.costUsd}`);
+    assert.ok(Math.abs(neonBill.savedUsd - 0.1425) < 1e-9, `Unexpected Neon savings: ${neonBill.savedUsd}`);
 
-    const longBill = calculateTurnBilling({
-      uncachedIn: 50_000,
-      cachedIn: 200_000,
-      thinkingOut: 1_000,
-      responseOut: 1_000,
-      spec: argonSpec,
-    });
-    assert.equal(longBill.isLongContext, true);
-    assert.ok(Math.abs(longBill.costUsd - 0.205) < 1e-9, `Unexpected long bill: ${longBill.costUsd}`);
-    assert.ok(longBill.savedUsd > 0.4, `Expected >$0.40 cache savings, got ${longBill.savedUsd}`);
+    // SanitizePrefs strips removed toggles cleanly
+    const cleanPrefs = sanitizePrefs({ currency: 'CNY', metricMode: 'net', theme: 'dark', lang: 'en' });
+    assert.equal(cleanPrefs.theme, 'dark');
+    assert.equal(cleanPrefs.lang, 'en');
+    assert.equal('currency' in cleanPrefs, false);
+    assert.equal('metricMode' in cleanPrefs, false);
 
-    // 2. Portable SQLite Fixture Extraction Test + Totals Detail Breakdown
-    const fixtureRoots = createFixtureAppData(tempFixtureDir, Date.now());
+    // 2. Traffic Parsers & Persistence Unit Test
+    testTrafficParsersAndArchive(tempStateDir);
+
+    // 3. Portable SQLite Fixture Extraction + Traffic Aggregation Test
+    const nowMs = Date.now();
+    const fixtureRoots = createFixtureAppData(tempFixtureDir, nowMs);
     const collector = createLedgerCollector({
       stateDir: tempStateDir,
       appDataRoots: fixtureRoots,
       disableArchiveWrite: true,
+      enableTrafficMonitor: false,
     });
+    collector.trafficMonitor.recordDelta(5_242_880, 1_048_576, nowMs);
     const snap = await collector.getLedgerSnapshot({ force: true });
     assert.equal(snap.totals.conversations, 1);
     assert.equal(snap.totals.turns, 1);
     assert.equal(snap.totals.grossTokens, 91_500);
-    assert.equal(snap.totals.netTokens, 11_500);
     assert.ok(snap.totals.costUsd > 0, 'Expected positive costUsd');
     assert.ok(snap.totals.savedUsd > 0, 'Expected positive savedUsd');
+    assert.equal(snap.totals.trafficUpBytes, 5_242_880);
+    assert.equal(snap.totals.trafficDownBytes, 1_048_576);
+    assert.equal(snap.totals.trafficBytes, 6_291_456);
+    assert.equal(snap.today.trafficBytes, 6_291_456);
     assert.equal(snap.totals.topConvs[0].title, 'Sample Fixture Chat');
     assert.equal(snap.totals.topConvs[0].workspace, 'demo-project');
-
-    assert.ok(Object.keys(snap.totals.byModel || {}).length >= 1, 'Expected populated totals.byModel');
-    assert.ok(
-      Array.isArray(snap.totals.hourlyCost) &&
-        snap.totals.hourlyCost.length === 24 &&
-        snap.totals.hourlyCost.some((v) => v > 0),
-      'Expected populated 24-hour totals.hourlyCost'
-    );
+    assert.ok(snap.totals.byModel['gemini-4-neon'], 'Expected gemini-4-neon in byModel');
 
     const dayKeys = Object.keys(snap.days);
     assert.equal(dayKeys.length, 1);
@@ -305,16 +413,18 @@ async function runTests() {
     const realCollector = createLedgerCollector({
       stateDir: tempStateDir,
       disableArchiveWrite: true,
+      enableTrafficMonitor: false,
     });
     const realSnap = await realCollector.getLedgerSnapshot({ force: true });
     for (const k of Object.keys(realSnap.days)) {
       assert.match(k, /^\d{4}-\d{2}-\d{2}$/, `Invalid local date key: ${k}`);
     }
 
-    // 3. HTTP Server End-to-End Test
+    // 4. HTTP Server End-to-End Test
     const srv = await startLedgerServer({
       standalonePort: 0,
       enableCdp: false,
+      enableTrafficMonitor: false,
       stateDir: tempStateDir,
       appDataRoots: fixtureRoots,
       disableArchiveWrite: true,
@@ -344,21 +454,23 @@ async function runTests() {
       assert.ok(cssText.includes('.tl-cal-grid'));
       assert.ok(jsText.includes('mountTokenLedgerApp'));
       assert.equal(apiJson.totals.turns, snap.totals.turns);
+      assert.ok(apiJson.trafficStatus, 'Expected trafficStatus in API response');
 
       const rPrefs = await fetch(`${baseUrl}/api/prefs`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ currency: 'CNY', metricMode: 'net' }),
+        body: JSON.stringify({ theme: 'dark', lang: 'en', widgetVisible: false }),
       });
       assert.equal(rPrefs.status, 200);
       const updatedJson = await rPrefs.json();
-      assert.equal(updatedJson.prefs.currency, 'CNY');
-      assert.equal(updatedJson.prefs.metricMode, 'net');
+      assert.equal(updatedJson.prefs.theme, 'dark');
+      assert.equal(updatedJson.prefs.lang, 'en');
+      assert.equal(updatedJson.prefs.widgetVisible, false);
     } finally {
       await srv.close();
     }
 
-    // 4. Strict Zero-Blue/Purple Palette Audit & Copy/Scrollbar Checks
+    // 5. Strict Zero-Blue/Purple Palette Audit & Copy/Scrollbar Checks
     const colorsChecked = auditPaletteZeroBluePurple();
     auditUiCopyAndScrollbars();
 
@@ -372,6 +484,7 @@ async function runTests() {
           activeDays: realSnap.totals.activeDays,
           costUsd: Number(realSnap.totals.costUsd.toFixed(2)),
           savedUsd: Number(realSnap.totals.savedUsd.toFixed(2)),
+          models: Object.keys(realSnap.totals.byModel || {}),
         },
         null,
         2

@@ -21,6 +21,7 @@ import { homedir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { calculateTurnBilling, getRateCard, resolveModelSpec } from './pricing.mjs';
+import { createTrafficMonitor } from './traffic.mjs';
 
 const UUID_RE = /^[0-9a-f-]{36}$/i;
 const PRODUCT_DIRS = ['antigravity', 'antigravity-ide', 'antigravity-cli'];
@@ -31,9 +32,6 @@ const ARCHIVE_FLUSH_MS = 15_000;
 export const DEFAULT_PREFS = {
   lang: 'zh-CN',
   theme: 'auto',
-  metricMode: 'gross',
-  currency: 'USD',
-  usdToCny: 7.25,
   widgetVisible: true,
   widgetPos: null,
 };
@@ -271,11 +269,6 @@ export function sanitizePrefs(raw, base = DEFAULT_PREFS) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return out;
   if (raw.lang === 'zh-CN' || raw.lang === 'en') out.lang = raw.lang;
   if (raw.theme === 'auto' || raw.theme === 'light' || raw.theme === 'dark') out.theme = raw.theme;
-  if (raw.metricMode === 'gross' || raw.metricMode === 'net') out.metricMode = raw.metricMode;
-  if (raw.currency === 'USD' || raw.currency === 'CNY') out.currency = raw.currency;
-  if (typeof raw.usdToCny === 'number' && Number.isFinite(raw.usdToCny) && raw.usdToCny > 0 && raw.usdToCny < 100) {
-    out.usdToCny = Number(raw.usdToCny.toFixed(2));
-  }
   if (typeof raw.widgetVisible === 'boolean') out.widgetVisible = raw.widgetVisible;
   if (raw.widgetPos === null) {
     out.widgetPos = null;
@@ -297,7 +290,6 @@ export function sanitizePrefs(raw, base = DEFAULT_PREFS) {
 function createEmptyAgg() {
   return {
     grossTokens: 0,
-    netTokens: 0,
     uncachedIn: 0,
     cachedIn: 0,
     thinkingOut: 0,
@@ -309,12 +301,14 @@ function createEmptyAgg() {
     costThink: 0,
     costResp: 0,
     turns: 0,
+    trafficUpBytes: 0,
+    trafficDownBytes: 0,
+    trafficBytes: 0,
   };
 }
 
 function addAgg(target, delta) {
   target.grossTokens += delta.grossTokens;
-  target.netTokens += delta.netTokens;
   target.uncachedIn += delta.uncachedIn;
   target.cachedIn += delta.cachedIn;
   target.thinkingOut += delta.thinkingOut;
@@ -391,6 +385,19 @@ export function createLedgerCollector(options = {}) {
   let lastScanAt = 0;
   let revCounter = 1;
   let lastDataSig = '';
+
+  const trafficMonitor = createTrafficMonitor({
+    stateDir,
+    nowFn,
+    disableArchiveWrite,
+    onDelta: () => {
+      revCounter++;
+      lastScanAt = 0;
+    },
+  });
+  if (options.enableTrafficMonitor === true) {
+    trafficMonitor.start();
+  }
 
   function readPrefs() {
     if (prefsCache) return prefsCache;
@@ -712,8 +719,8 @@ export function createLedgerCollector(options = {}) {
     totals.longestStreak = 0;
     totals.peakDay = null;
     totals.hourlyTokens = new Array(24).fill(0);
-    totals.hourlyNetTokens = new Array(24).fill(0);
     totals.hourlyCost = new Array(24).fill(0);
+    totals.hourlyTraffic = new Array(24).fill(0);
     totals.byModel = {};
     totals.topConvs = [];
 
@@ -730,8 +737,8 @@ export function createLedgerCollector(options = {}) {
           date: dateKey,
           ...createEmptyAgg(),
           hourlyTokens: new Array(24).fill(0),
-          hourlyNetTokens: new Array(24).fill(0),
           hourlyCost: new Array(24).fill(0),
+          hourlyTraffic: new Array(24).fill(0),
           byModel: {},
           topConvs: [],
         };
@@ -749,8 +756,8 @@ export function createLedgerCollector(options = {}) {
           activeDays: 0,
           peakDay: null,
           hourlyTokens: new Array(24).fill(0),
-          hourlyNetTokens: new Array(24).fill(0),
           hourlyCost: new Array(24).fill(0),
+          hourlyTraffic: new Array(24).fill(0),
           byModel: {},
           topConvs: [],
         };
@@ -786,7 +793,6 @@ export function createLedgerCollector(options = {}) {
           product: conv.product,
           turns: 0,
           grossTokens: 0,
-          netTokens: 0,
           costUsd: 0,
           savedUsd: 0,
         };
@@ -794,7 +800,6 @@ export function createLedgerCollector(options = {}) {
       }
       c.turns += 1;
       c.grossTokens += turnDelta.grossTokens;
-      c.netTokens += turnDelta.netTokens;
       c.costUsd += turnDelta.costUsd;
       c.savedUsd += turnDelta.savedUsd;
     }
@@ -816,10 +821,8 @@ export function createLedgerCollector(options = {}) {
 
         const totalOut = turn.thinkingOut + turn.responseOut;
         const grossTokens = turn.uncachedIn + turn.cachedIn + totalOut;
-        const netTokens = turn.uncachedIn + totalOut;
         const turnDelta = {
           grossTokens,
-          netTokens,
           uncachedIn: turn.uncachedIn,
           cachedIn: turn.cachedIn,
           thinkingOut: turn.thinkingOut,
@@ -841,7 +844,6 @@ export function createLedgerCollector(options = {}) {
 
         addAgg(totals, turnDelta);
         totals.hourlyTokens[hour] += grossTokens;
-        totals.hourlyNetTokens[hour] += netTokens;
         totals.hourlyCost[hour] += billing.costUsd;
         addModelAgg(totals.byModel, spec, turnDelta);
         addConvEntry(allConvMap, conv, turnDelta);
@@ -849,7 +851,6 @@ export function createLedgerCollector(options = {}) {
         const dayObj = ensureDay(dateKey);
         addAgg(dayObj, turnDelta);
         dayObj.hourlyTokens[hour] += grossTokens;
-        dayObj.hourlyNetTokens[hour] += netTokens;
         dayObj.hourlyCost[hour] += billing.costUsd;
         addModelAgg(dayObj.byModel, spec, turnDelta);
         if (!dayConvMaps.has(dateKey)) dayConvMaps.set(dateKey, new Map());
@@ -858,7 +859,6 @@ export function createLedgerCollector(options = {}) {
         const monthObj = ensureMonth(monthKey);
         addAgg(monthObj, turnDelta);
         monthObj.hourlyTokens[hour] += grossTokens;
-        monthObj.hourlyNetTokens[hour] += netTokens;
         monthObj.hourlyCost[hour] += billing.costUsd;
         addModelAgg(monthObj.byModel, spec, turnDelta);
         if (!monthConvMaps.has(monthKey)) monthConvMaps.set(monthKey, new Map());
@@ -866,8 +866,41 @@ export function createLedgerCollector(options = {}) {
       }
     }
 
-    // Finalize top conversations & peak/streak metrics
-    const activeDates = Object.keys(days).sort();
+    // Merge OS-level per-process daily & hourly network traffic
+    for (const [dateKey, tDay] of trafficMonitor.getDaysMap().entries()) {
+      const up = Math.max(0, Number(tDay.upBytes || 0));
+      const down = Math.max(0, Number(tDay.downBytes || 0));
+      const sum = up + down;
+      if (sum <= 0) continue;
+
+      const dayObj = ensureDay(dateKey);
+      dayObj.trafficUpBytes += up;
+      dayObj.trafficDownBytes += down;
+      dayObj.trafficBytes += sum;
+
+      const monthObj = ensureMonth(dateKey.slice(0, 7));
+      monthObj.trafficUpBytes += up;
+      monthObj.trafficDownBytes += down;
+      monthObj.trafficBytes += sum;
+
+      totals.trafficUpBytes += up;
+      totals.trafficDownBytes += down;
+      totals.trafficBytes += sum;
+
+      for (let h = 0; h < 24; h++) {
+        const hSum = Number(tDay.hourlyUp?.[h] || 0) + Number(tDay.hourlyDown?.[h] || 0);
+        if (hSum > 0) {
+          dayObj.hourlyTraffic[h] += hSum;
+          monthObj.hourlyTraffic[h] += hSum;
+          totals.hourlyTraffic[h] += hSum;
+        }
+      }
+    }
+
+    // Finalize top conversations & peak/streak metrics (streaks track days with actual turns)
+    const activeDates = Object.keys(days)
+      .filter((k) => days[k].turns > 0)
+      .sort();
     totals.activeDays = activeDates.length;
 
     for (const dateKey of activeDates) {
@@ -945,7 +978,6 @@ export function createLedgerCollector(options = {}) {
     const today = {
       date: todayKey,
       grossTokens: todayObj.grossTokens,
-      netTokens: todayObj.netTokens,
       uncachedIn: todayObj.uncachedIn,
       cachedIn: todayObj.cachedIn,
       thinkingOut: todayObj.thinkingOut,
@@ -953,11 +985,15 @@ export function createLedgerCollector(options = {}) {
       costUsd: todayObj.costUsd,
       savedUsd: todayObj.savedUsd,
       turns: todayObj.turns,
+      trafficUpBytes: todayObj.trafficUpBytes,
+      trafficDownBytes: todayObj.trafficDownBytes,
+      trafficBytes: todayObj.trafficBytes,
       avg7dCostUsd,
       avg7dGrossTokens,
     };
 
-    const dataSig = `${totals.turns}:${totals.grossTokens}:${totals.conversations}:${Math.round(totals.costUsd * 1000)}`;
+    const trafficStatus = trafficMonitor.getStatus();
+    const dataSig = `${totals.turns}:${totals.grossTokens}:${totals.conversations}:${Math.round(totals.costUsd * 1000)}:${totals.trafficUpBytes}:${totals.trafficDownBytes}:${trafficStatus.state}`;
     if (dataSig !== lastDataSig) {
       lastDataSig = dataSig;
       revCounter++;
@@ -969,6 +1005,7 @@ export function createLedgerCollector(options = {}) {
       rev: String(revCounter),
       prefs,
       rateCard: getRateCard(),
+      trafficStatus,
       totals,
       allModels: totals.byModel,
       today,
@@ -991,10 +1028,15 @@ export function createLedgerCollector(options = {}) {
 
   return {
     stateDir,
+    trafficMonitor,
     readPrefs,
     updatePrefs,
     flushArchive,
     getLedgerSnapshot,
+    close() {
+      trafficMonitor.stop();
+      flushArchive(true);
+    },
   };
 }
 
@@ -1020,7 +1062,7 @@ const isMain =
 
 if (isMain) {
   const args = parseCliArgs(process.argv.slice(2));
-  const collector = createLedgerCollector();
+  const collector = createLedgerCollector({ enableTrafficMonitor: false });
   const snap = await collector.getLedgerSnapshot({ force: true });
   collector.flushArchive(true);
 
@@ -1029,15 +1071,18 @@ if (isMain) {
     const out = {
       generatedAt: snap.generatedAt,
       todayKey: snap.todayKey,
+      trafficStatus: snap.trafficStatus,
       today: snap.today,
       totals: snap.totals,
       recentDays: recentDates.map((d) => ({
         date: d,
         turns: snap.days[d].turns,
         grossTokens: snap.days[d].grossTokens,
-        netTokens: snap.days[d].netTokens,
         costUsd: Number(snap.days[d].costUsd.toFixed(4)),
         savedUsd: Number(snap.days[d].savedUsd.toFixed(4)),
+        trafficBytes: snap.days[d].trafficBytes,
+        trafficUpBytes: snap.days[d].trafficUpBytes,
+        trafficDownBytes: snap.days[d].trafficDownBytes,
       })),
     };
     if (args.month && snap.months[args.month]) {

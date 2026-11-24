@@ -19,6 +19,8 @@ const WATCH_FILES = [
   'server.mjs',
   'pricing.mjs',
   'collector.mjs',
+  'traffic.mjs',
+  'win_tcp_monitor.ps1',
   'cdp_modal.mjs',
   join('web', 'index.html'),
   join('web', 'styles.css'),
@@ -119,7 +121,10 @@ function createStandaloneServer(collector, { port = 0, host = '127.0.0.1' } = {}
 }
 
 export async function startLedgerServer(options = {}) {
-  const collector = createLedgerCollector(options);
+  const collector = createLedgerCollector({
+    ...options,
+    enableTrafficMonitor: options.enableTrafficMonitor !== false,
+  });
   let app = null;
   let httpHandle = null;
   let cdpInjector = null;
@@ -162,7 +167,7 @@ export async function startLedgerServer(options = {}) {
     cdpInjector = startCdpModalInjector(collector, {
       onSuperseded: () => {
         cdpInjector?.stop();
-        collector.flushArchive(true);
+        collector.close();
         process.exit(0);
       },
     });
@@ -175,7 +180,7 @@ export async function startLedgerServer(options = {}) {
     cdpInjector,
     async close() {
       cdpInjector?.stop();
-      collector.flushArchive(true);
+      collector.close();
       await app?.close?.();
       if (httpHandle?.server) {
         await new Promise((res) => httpHandle.server.close(() => res()));
