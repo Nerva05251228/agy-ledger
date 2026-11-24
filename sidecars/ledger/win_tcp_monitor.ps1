@@ -1,6 +1,7 @@
 param(
   [int]$ParentPid = 0,
-  [int]$PollMs = 1500
+  [int]$PollMs = 1500,
+  [switch]$Once
 )
 
 $ErrorActionPreference = 'Stop'
@@ -11,6 +12,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Net;
 using System.Runtime.InteropServices;
+using System.Security.Principal;
 using System.Text.RegularExpressions;
 using System.Threading;
 using Microsoft.Win32;
@@ -20,6 +22,11 @@ public static class AgyTcpMonitor {
     const int AF_INET6 = 23;
     const int TCP_TABLE_OWNER_PID_ALL = 5;
     const int TcpConnectionEstatsData = 1;
+    const uint ERROR_ACCESS_DENIED = 5;
+    const uint MIB_TCP_STATE_LISTEN = 2;
+    const uint MIB_TCP_STATE_ESTAB = 5;
+    const ulong MAX_CONN_TICK_BYTES = 1073741824UL;     // 1 GiB per socket per tick (~5.4 Gbps at 1.5s)
+    const ulong MAX_SANE_COUNTER = 1125899906842624UL;  // 1 PiB upper sanity guard
 
     static volatile bool _stopRequested = false;
 
@@ -31,6 +38,9 @@ public static class AgyTcpMonitor {
         "karing", "qv2ray", "gost", "brook", "tailscaled", "warp",
         "proxifier", "loon", "stash", "daed", "juicity"
     };
+
+    delegate uint GetEstatsFn(IntPtr rwOutPtr, IntPtr rodPtr);
+    delegate uint SetEstatsFn(IntPtr rwEnablePtr);
 
     [StructLayout(LayoutKind.Sequential)]
     struct MIB_TCPROW_OWNER_PID {
@@ -116,6 +126,32 @@ public static class AgyTcpMonitor {
     [DllImport("iphlpapi.dll")]
     static extern uint GetPerTcp6ConnectionEStats(ref MIB_TCP6ROW Row, int EstatsType, IntPtr Rw, uint RwVersion, uint RwSize, IntPtr Ros, uint RosVersion, uint RosSize, IntPtr Rod, uint RodVersion, uint RodSize);
 
+    static bool IsProcessElevated() {
+        try {
+            using (var identity = WindowsIdentity.GetCurrent()) {
+                if (identity == null) return false;
+                var principal = new WindowsPrincipal(identity);
+                return principal.IsInRole(WindowsBuiltInRole.Administrator);
+            }
+        } catch {
+            return false;
+        }
+    }
+
+    static void ZeroBuffer(IntPtr ptr, int size) {
+        for (int i = 0; i < size; i++) {
+            Marshal.WriteByte(ptr, i, 0);
+        }
+    }
+
+    static bool IsRodSane(TCP_ESTATS_DATA_ROD_v0 rod) {
+        if (rod.DataBytesOut > MAX_SANE_COUNTER || rod.DataBytesIn > MAX_SANE_COUNTER) return false;
+        // RFC 4898 / tcpestats.h invariant: any positive data byte count requires at least 1 data segment.
+        if (rod.DataBytesOut > 0 && rod.DataSegsOut == 0) return false;
+        if (rod.DataBytesIn > 0 && rod.DataSegsIn == 0) return false;
+        return true;
+    }
+
     static ushort PortHost(uint p) {
         return (ushort)IPAddress.NetworkToHostOrder((short)(p & 0xFFFF));
     }
@@ -128,14 +164,24 @@ public static class AgyTcpMonitor {
         return addr == 0;
     }
 
+    static bool IsIpv4MappedV6(byte[] addr) {
+        if (addr == null || addr.Length != 16) return false;
+        for (int i = 0; i < 10; i++) if (addr[i] != 0) return false;
+        return addr[10] == 0xFF && addr[11] == 0xFF;
+    }
+
     static bool IsLoopbackV6(byte[] addr) {
         if (addr == null || addr.Length != 16) return false;
+        if (IsIpv4MappedV6(addr)) return addr[12] == 127;
         for (int i = 0; i < 15; i++) if (addr[i] != 0) return false;
         return addr[15] == 1;
     }
 
     static bool IsUnspecifiedV6(byte[] addr) {
         if (addr == null || addr.Length != 16) return true;
+        if (IsIpv4MappedV6(addr)) {
+            return addr[12] == 0 && addr[13] == 0 && addr[14] == 0 && addr[15] == 0;
+        }
         for (int i = 0; i < 16; i++) if (addr[i] != 0) return false;
         return true;
     }
@@ -247,36 +293,148 @@ public static class AgyTcpMonitor {
         }
     }
 
-    public static void Run(int parentPid, int pollMs) {
-        _stopRequested = false;
-        var stdinThread = new Thread(() => {
-            try {
-                while (Console.In.ReadLine() != null) {}
-            } catch {}
-            _stopRequested = true;
-        });
-        stdinThread.IsBackground = true;
-        stdinThread.Start();
+    static void SampleEstatsConn(
+        string key,
+        uint tcpState,
+        GetEstatsFn getFn,
+        SetEstatsFn setFn,
+        IntPtr rwEnablePtr,
+        IntPtr rwOutPtr,
+        IntPtr rodPtr,
+        int rwSizeInt,
+        int rodSizeInt,
+        Dictionary<string, Tuple<ulong, ulong>> prevByConn,
+        ref ulong upDelta,
+        ref ulong downDelta,
+        ref int okCount,
+        ref int deniedCount
+    ) {
+        // 1. Always zero both RW and ROD output buffers before querying Windows TCP EStats.
+        ZeroBuffer(rwOutPtr, rwSizeInt);
+        ZeroBuffer(rodPtr, rodSizeInt);
+        uint getErr = getFn(rwOutPtr, rodPtr);
+        if (getErr == ERROR_ACCESS_DENIED) {
+            deniedCount++;
+            prevByConn.Remove(key);
+            return;
+        }
+        if (getErr != 0) {
+            prevByConn.Remove(key);
+            return;
+        }
 
+        // 2. Microsoft documentation requires checking Rw.EnableCollection before trusting Rod.
+        //    When EnableCollection == 0, GetPerTcp[6]ConnectionEStats still returns NO_ERROR (0)
+        //    while leaving Rod populated with undefined/uninitialized memory.
+        byte enabled = Marshal.ReadByte(rwOutPtr);
+        if (enabled == 0) {
+            prevByConn.Remove(key);
+
+            // Only attempt to enable collection on ESTABLISHED connections.
+            if (tcpState != MIB_TCP_STATE_ESTAB) {
+                return;
+            }
+
+            uint setErr = setFn(rwEnablePtr);
+            if (setErr == ERROR_ACCESS_DENIED) {
+                deniedCount++;
+                return;
+            }
+            if (setErr != 0) {
+                return;
+            }
+
+            // Re-query and verify EnableCollection is now active before setting baseline.
+            ZeroBuffer(rwOutPtr, rwSizeInt);
+            ZeroBuffer(rodPtr, rodSizeInt);
+            uint verifyErr = getFn(rwOutPtr, rodPtr);
+            if (verifyErr == ERROR_ACCESS_DENIED) {
+                deniedCount++;
+                return;
+            }
+            if (verifyErr != 0 || Marshal.ReadByte(rwOutPtr) == 0) {
+                return;
+            }
+
+            var initRod = (TCP_ESTATS_DATA_ROD_v0)Marshal.PtrToStructure(rodPtr, typeof(TCP_ESTATS_DATA_ROD_v0));
+            if (!IsRodSane(initRod)) {
+                return;
+            }
+
+            okCount++;
+            // Always baseline newly enabled sockets without attributing initial counter values as deltas.
+            prevByConn[key] = Tuple.Create(initRod.DataBytesOut, initRod.DataBytesIn);
+            return;
+        }
+
+        // 3. Collection is verified active (getErr == 0 && EnableCollection != 0).
+        var rod = (TCP_ESTATS_DATA_ROD_v0)Marshal.PtrToStructure(rodPtr, typeof(TCP_ESTATS_DATA_ROD_v0));
+        if (!IsRodSane(rod)) {
+            prevByConn.Remove(key);
+            return;
+        }
+
+        okCount++;
+
+        ulong curOut = rod.DataBytesOut;
+        ulong curIn = rod.DataBytesIn;
+        Tuple<ulong, ulong> prev;
+        if (prevByConn.TryGetValue(key, out prev)) {
+            // Count strictly monotonic positive increments only; if a counter drops (socket reset/reuse),
+            // re-baseline cleanly instead of adding curOut/curIn.
+            if (curOut >= prev.Item1) {
+                ulong dOut = curOut - prev.Item1;
+                if (dOut <= MAX_CONN_TICK_BYTES) upDelta += dOut;
+            }
+            if (curIn >= prev.Item2) {
+                ulong dIn = curIn - prev.Item2;
+                if (dIn <= MAX_CONN_TICK_BYTES) downDelta += dIn;
+            }
+        }
+        // First sighting of an already-enabled connection (e.g. after sidecar restart):
+        // record baseline only; never dump historical lifetime counters into this tick.
+        prevByConn[key] = Tuple.Create(curOut, curIn);
+    }
+
+    public static void Run(int parentPid, int pollMs, bool once) {
+        _stopRequested = false;
+        if (!once) {
+            var stdinThread = new Thread(() => {
+                try {
+                    while (Console.In.ReadLine() != null) {}
+                } catch {}
+                _stopRequested = true;
+            });
+            stdinThread.IsBackground = true;
+            stdinThread.Start();
+        }
+
+        bool isElevated = IsProcessElevated();
         var prevByConn = new Dictionary<string, Tuple<ulong, ulong>>();
-        var enabledConns = new HashSet<string>();
         var proxyPorts = DetectSystemProxyPorts();
-        long lastProxyRefresh = Environment.TickCount;
+        var proxyWatch = Stopwatch.StartNew();
         bool isFirstTick = true;
         int tickCount = 0;
 
-        IntPtr rwPtr = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(TCP_ESTATS_DATA_RW_v0)));
-        IntPtr rodPtr = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(TCP_ESTATS_DATA_ROD_v0)));
-        Marshal.StructureToPtr(new TCP_ESTATS_DATA_RW_v0 { EnableCollection = 1 }, rwPtr, false);
-        uint rwSize = (uint)Marshal.SizeOf(typeof(TCP_ESTATS_DATA_RW_v0));
-        uint rodSize = (uint)Marshal.SizeOf(typeof(TCP_ESTATS_DATA_ROD_v0));
+        int rwSizeInt = Marshal.SizeOf(typeof(TCP_ESTATS_DATA_RW_v0));
+        int rodSizeInt = Marshal.SizeOf(typeof(TCP_ESTATS_DATA_ROD_v0));
+        uint rwSize = (uint)rwSizeInt;
+        uint rodSize = (uint)rodSizeInt;
+
+        IntPtr rwEnablePtr = Marshal.AllocHGlobal(rwSizeInt);
+        IntPtr rwOutPtr = Marshal.AllocHGlobal(rwSizeInt);
+        IntPtr rodPtr = Marshal.AllocHGlobal(rodSizeInt);
+        ZeroBuffer(rwEnablePtr, rwSizeInt);
+        ZeroBuffer(rwOutPtr, rwSizeInt);
+        ZeroBuffer(rodPtr, rodSizeInt);
+        Marshal.StructureToPtr(new TCP_ESTATS_DATA_RW_v0 { EnableCollection = 1 }, rwEnablePtr, false);
 
         try {
             while (!_stopRequested && IsParentAlive(parentPid)) {
                 tickCount++;
-                if (unchecked(Environment.TickCount - lastProxyRefresh) > 15000) {
+                if (proxyWatch.ElapsedMilliseconds > 15000) {
                     proxyPorts = DetectSystemProxyPorts();
-                    lastProxyRefresh = Environment.TickCount;
+                    proxyWatch.Restart();
                 }
 
                 var agyPids = new HashSet<uint>();
@@ -296,10 +454,9 @@ public static class AgyTcpMonitor {
                 var rows6 = GetTcp6Rows();
 
                 var listenOwners = new Dictionary<ushort, HashSet<uint>>();
-                var externalPids = new HashSet<uint>();
 
                 foreach (var r in rows4) {
-                    if (r.state == 2) {
+                    if (r.state == MIB_TCP_STATE_LISTEN) {
                         ushort lp = PortHost(r.localPort);
                         HashSet<uint> set;
                         if (!listenOwners.TryGetValue(lp, out set)) {
@@ -307,12 +464,10 @@ public static class AgyTcpMonitor {
                             listenOwners[lp] = set;
                         }
                         set.Add(r.owningPid);
-                    } else if (IsActiveTcpState(r.state) && !IsLoopbackV4(r.remoteAddr) && !IsUnspecifiedV4(r.remoteAddr)) {
-                        externalPids.Add(r.owningPid);
                     }
                 }
                 foreach (var r in rows6) {
-                    if (r.state == 2) {
+                    if (r.state == MIB_TCP_STATE_LISTEN) {
                         ushort lp = PortHost(r.localPort);
                         HashSet<uint> set;
                         if (!listenOwners.TryGetValue(lp, out set)) {
@@ -320,8 +475,6 @@ public static class AgyTcpMonitor {
                             listenOwners[lp] = set;
                         }
                         set.Add(r.owningPid);
-                    } else if (IsActiveTcpState(r.state) && !IsLoopbackV6(r.remoteAddr) && !IsUnspecifiedV6(r.remoteAddr)) {
-                        externalPids.Add(r.owningPid);
                     }
                 }
 
@@ -332,6 +485,8 @@ public static class AgyTcpMonitor {
                 int deniedCount = 0;
                 int okCount = 0;
 
+                // Only count loopback traffic when targeting an explicitly configured proxy port
+                // or a known proxy process (never internal AGY IPC, Chrome CDP, or local dev/MCP servers).
                 Func<ushort, ushort, bool> shouldCountLoopback = (lp, rp) => {
                     HashSet<uint> localOwners;
                     if (listenOwners.TryGetValue(lp, out localOwners)) {
@@ -342,7 +497,7 @@ public static class AgyTcpMonitor {
                         foreach (var op in remoteOwners) if (agyPids.Contains(op)) return false;
                         if (proxyPorts.Contains(rp)) return true;
                         foreach (var op in remoteOwners) {
-                            if (proxyPids.Contains(op) || externalPids.Contains(op)) return true;
+                            if (proxyPids.Contains(op)) return true;
                         }
                         return false;
                     }
@@ -359,41 +514,32 @@ public static class AgyTcpMonitor {
                     if (IsLoopbackV4(r.remoteAddr) && !shouldCountLoopback(lp, rp)) continue;
 
                     string key = "4:" + r.owningPid + ":" + r.localAddr + ":" + lp + "->" + r.remoteAddr + ":" + rp;
-                    seenKeys.Add(key);
+                    if (!seenKeys.Add(key)) continue;
                     activeConns++;
 
                     var row = new MIB_TCPROW {
                         state = r.state, localAddr = r.localAddr, localPort = r.localPort,
                         remoteAddr = r.remoteAddr, remotePort = r.remotePort
                     };
-                    if (!enabledConns.Contains(key)) {
-                        uint setErr = SetPerTcpConnectionEStats(ref row, TcpConnectionEstatsData, rwPtr, 0, rwSize, 0);
-                        if (setErr == 0) enabledConns.Add(key);
-                        else if (setErr == 5) deniedCount++;
-                    }
-                    uint getErr = GetPerTcpConnectionEStats(ref row, TcpConnectionEstatsData, IntPtr.Zero, 0, 0, IntPtr.Zero, 0, 0, rodPtr, 0, rodSize);
-                    if (getErr == 0) {
-                        okCount++;
-                        var rod = (TCP_ESTATS_DATA_ROD_v0)Marshal.PtrToStructure(rodPtr, typeof(TCP_ESTATS_DATA_ROD_v0));
-                        ulong curOut = rod.DataBytesOut;
-                        ulong curIn = rod.DataBytesIn;
-                        Tuple<ulong, ulong> prev;
-                        if (prevByConn.TryGetValue(key, out prev)) {
-                            ulong dOut = curOut >= prev.Item1 ? (curOut - prev.Item1) : curOut;
-                            ulong dIn = curIn >= prev.Item2 ? (curIn - prev.Item2) : curIn;
-                            if (dOut < 4294967296UL) upDelta += dOut;
-                            if (dIn < 4294967296UL) downDelta += dIn;
-                        } else if (!isFirstTick) {
-                            if (curOut < 4294967296UL) upDelta += curOut;
-                            if (curIn < 4294967296UL) downDelta += curIn;
-                        }
-                        prevByConn[key] = Tuple.Create(curOut, curIn);
-                    } else if (getErr == 5) {
-                        deniedCount++;
-                    }
+                    SampleEstatsConn(
+                        key,
+                        r.state,
+                        (rwPtrOut, rodPtrOut) => GetPerTcpConnectionEStats(ref row, TcpConnectionEstatsData, rwPtrOut, 0, rwSize, IntPtr.Zero, 0, 0, rodPtrOut, 0, rodSize),
+                        (rwPtrEn) => SetPerTcpConnectionEStats(ref row, TcpConnectionEstatsData, rwPtrEn, 0, rwSize, 0),
+                        rwEnablePtr,
+                        rwOutPtr,
+                        rodPtr,
+                        rwSizeInt,
+                        rodSizeInt,
+                        prevByConn,
+                        ref upDelta,
+                        ref downDelta,
+                        ref okCount,
+                        ref deniedCount
+                    );
                 }
 
-                // IPv6 connections
+                // IPv6 connections (including IPv4-mapped IPv6 sockets)
                 foreach (var r in rows6) {
                     if (!IsActiveTcpState(r.state) || !agyPids.Contains(r.owningPid)) continue;
                     if (IsUnspecifiedV6(r.remoteAddr)) continue;
@@ -403,38 +549,29 @@ public static class AgyTcpMonitor {
                     if (IsLoopbackV6(r.remoteAddr) && !shouldCountLoopback(lp, rp)) continue;
 
                     string key = "6:" + r.owningPid + ":" + Convert.ToBase64String(r.localAddr) + ":" + lp + "->" + Convert.ToBase64String(r.remoteAddr) + ":" + rp;
-                    seenKeys.Add(key);
+                    if (!seenKeys.Add(key)) continue;
                     activeConns++;
 
                     var row = new MIB_TCP6ROW {
                         state = r.state, localAddr = r.localAddr, localScopeId = r.localScopeId, localPort = r.localPort,
                         remoteAddr = r.remoteAddr, remoteScopeId = r.remoteScopeId, remotePort = r.remotePort
                     };
-                    if (!enabledConns.Contains(key)) {
-                        uint setErr = SetPerTcp6ConnectionEStats(ref row, TcpConnectionEstatsData, rwPtr, 0, rwSize, 0);
-                        if (setErr == 0) enabledConns.Add(key);
-                        else if (setErr == 5) deniedCount++;
-                    }
-                    uint getErr = GetPerTcp6ConnectionEStats(ref row, TcpConnectionEstatsData, IntPtr.Zero, 0, 0, IntPtr.Zero, 0, 0, rodPtr, 0, rodSize);
-                    if (getErr == 0) {
-                        okCount++;
-                        var rod = (TCP_ESTATS_DATA_ROD_v0)Marshal.PtrToStructure(rodPtr, typeof(TCP_ESTATS_DATA_ROD_v0));
-                        ulong curOut = rod.DataBytesOut;
-                        ulong curIn = rod.DataBytesIn;
-                        Tuple<ulong, ulong> prev;
-                        if (prevByConn.TryGetValue(key, out prev)) {
-                            ulong dOut = curOut >= prev.Item1 ? (curOut - prev.Item1) : curOut;
-                            ulong dIn = curIn >= prev.Item2 ? (curIn - prev.Item2) : curIn;
-                            if (dOut < 4294967296UL) upDelta += dOut;
-                            if (dIn < 4294967296UL) downDelta += dIn;
-                        } else if (!isFirstTick) {
-                            if (curOut < 4294967296UL) upDelta += curOut;
-                            if (curIn < 4294967296UL) downDelta += curIn;
-                        }
-                        prevByConn[key] = Tuple.Create(curOut, curIn);
-                    } else if (getErr == 5) {
-                        deniedCount++;
-                    }
+                    SampleEstatsConn(
+                        key,
+                        r.state,
+                        (rwPtrOut, rodPtrOut) => GetPerTcp6ConnectionEStats(ref row, TcpConnectionEstatsData, rwPtrOut, 0, rwSize, IntPtr.Zero, 0, 0, rodPtrOut, 0, rodSize),
+                        (rwPtrEn) => SetPerTcp6ConnectionEStats(ref row, TcpConnectionEstatsData, rwPtrEn, 0, rwSize, 0),
+                        rwEnablePtr,
+                        rwOutPtr,
+                        rodPtr,
+                        rwSizeInt,
+                        rodSizeInt,
+                        prevByConn,
+                        ref upDelta,
+                        ref downDelta,
+                        ref okCount,
+                        ref deniedCount
+                    );
                 }
 
                 // Prune closed connections
@@ -444,24 +581,33 @@ public static class AgyTcpMonitor {
                 }
                 foreach (var k in stale) {
                     prevByConn.Remove(k);
-                    enabledConns.Remove(k);
                 }
 
-                string status = (deniedCount > 0 && okCount == 0) ? "admin_required" : "active";
-                if (isFirstTick || upDelta > 0 || downDelta > 0 || (tickCount % 6 == 0)) {
+                bool needsAdmin = (deniedCount > 0 && okCount == 0) || (!isElevated && okCount == 0);
+                string status = needsAdmin ? "admin_required" : "active";
+                if (status != "active") {
+                    upDelta = 0;
+                    downDelta = 0;
+                }
+
+                if (once || isFirstTick || upDelta > 0 || downDelta > 0 || (tickCount % 6 == 0)) {
                     Console.WriteLine(
                         "{\"status\":\"" + status + "\",\"upDelta\":" + upDelta +
                         ",\"downDelta\":" + downDelta + ",\"activeConns\":" + activeConns +
+                        ",\"okConns\":" + okCount + ",\"deniedConns\":" + deniedCount +
+                        ",\"elevated\":" + (isElevated ? "true" : "false") +
                         ",\"pidCount\":" + agyPids.Count + "}"
                     );
                     Console.Out.Flush();
                 }
 
                 isFirstTick = false;
+                if (once) break;
                 Thread.Sleep(pollMs);
             }
         } finally {
-            Marshal.FreeHGlobal(rwPtr);
+            Marshal.FreeHGlobal(rwEnablePtr);
+            Marshal.FreeHGlobal(rwOutPtr);
             Marshal.FreeHGlobal(rodPtr);
         }
     }
@@ -469,4 +615,4 @@ public static class AgyTcpMonitor {
 '@
 
 Add-Type -TypeDefinition $cs -ErrorAction Stop
-[AgyTcpMonitor]::Run($ParentPid, $PollMs)
+[AgyTcpMonitor]::Run($ParentPid, $PollMs, $Once.IsPresent)

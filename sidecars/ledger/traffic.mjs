@@ -6,7 +6,8 @@
  * (`Antigravity`, `language_server*`, `agy-cli`) while automatically excluding
  * internal Antigravity loopback IPC and unrelated local dev servers:
  *
- *   - Windows (`win32`): persistent hidden PowerShell + compiled C# worker
+ *   - Windows defaults to the local Clash-compatible proxy connection API.
+ *     The optional TCP EStats collector uses a PowerShell + compiled C# worker
  *     (`win_tcp_monitor.ps1`) calling `iphlpapi.dll` (`GetExtendedTcpTable` +
  *     `GetPerTcpConnectionEStats` / `GetPerTcp6ConnectionEStats`). Requires
  *     Administrator privileges on Windows; degrades cleanly to `admin_required`
@@ -28,8 +29,10 @@ const WIN_MONITOR_SCRIPT = join(__dirname, 'win_tcp_monitor.ps1');
 const execFileAsync = promisify(execFile);
 
 const FLUSH_INTERVAL_MS = 10_000;
-const MAX_SINGLE_TICK_BYTES = 4 * 1024 * 1024 * 1024; // 4 GiB sanity guard per tick
+const MAX_SINGLE_TICK_BYTES = 1024 * 1024 * 1024; // 1 GiB sanity guard per tick (~5.4 Gbps at 1.5s)
 const WIN_POLL_MS = 1500;
+const PROXY_POLL_MS = 1000;
+const LOCAL_CONTROLLER_PORTS = [10813, 9090, 9097];
 const MAC_POLL_MS = 3000;
 const LINUX_POLL_MS = 2500;
 
@@ -99,12 +102,12 @@ export function isKnownProxyProcessName(rawName) {
 
 function isLoopbackHost(host) {
   const h = String(host || '').trim().toLowerCase().replace(/^\[|\]$/g, '');
-  return h === '::1' || h === 'localhost' || h.startsWith('127.') || h === '::ffff:127.0.0.1';
+  return h === '::1' || h === 'localhost' || h.startsWith('127.') || h.startsWith('::ffff:127.');
 }
 
 function isUnspecifiedHost(host) {
   const h = String(host || '').trim().toLowerCase().replace(/^\[|\]$/g, '');
-  return !h || h === '0.0.0.0' || h === '::' || h === '*';
+  return !h || h === '0.0.0.0' || h === '::' || h === '*' || h === '::ffff:0.0.0.0';
 }
 
 function parseEnvProxyPorts() {
@@ -194,8 +197,6 @@ function splitHostPort(endpoint) {
 export function parseLinuxSsOutput(tcpText, listenText = '', configuredProxyPorts = new Set()) {
   const agyListenPorts = new Set();
   const proxyListenPorts = new Set(configuredProxyPorts);
-  const externalPids = new Set();
-  const pidByListenPort = new Map();
 
   for (const line of String(listenText || '').split(/\r?\n/)) {
     const trimmed = line.trim();
@@ -206,9 +207,6 @@ export function parseLinuxSsOutput(tcpText, listenText = '', configuredProxyPort
     if (!local.port) continue;
     for (const m of trimmed.matchAll(/\("([^"]+)",pid=(\d+)/g)) {
       const proc = m[1];
-      const pid = Number(m[2]);
-      if (!pidByListenPort.has(local.port)) pidByListenPort.set(local.port, new Set());
-      pidByListenPort.get(local.port).add(pid);
       if (isAntigravityProcessName(proc)) agyListenPorts.add(local.port);
       if (isKnownProxyProcessName(proc)) proxyListenPorts.add(local.port);
     }
@@ -233,10 +231,6 @@ export function parseLinuxSsOutput(tcpText, listenText = '', configuredProxyPort
       const proc = procMatch ? procMatch[1] : '';
       const pid = procMatch ? Number(procMatch[2]) : 0;
 
-      if (pid > 0 && !isLoopbackHost(remote.host) && !isUnspecifiedHost(remote.host)) {
-        externalPids.add(pid);
-      }
-
       current = { state, local, remote, proc, pid, sent: 0, recv: 0 };
       parsedSockets.push(current);
     } else if (current) {
@@ -260,16 +254,7 @@ export function parseLinuxSsOutput(tcpText, listenText = '', configuredProxyPort
 
     if (isLoopbackHost(s.remote.host)) {
       if (agyListenPorts.has(s.local.port) || agyListenPorts.has(s.remote.port)) continue;
-      let isProxy = proxyListenPorts.has(s.remote.port);
-      if (!isProxy && pidByListenPort.has(s.remote.port)) {
-        for (const ownerPid of pidByListenPort.get(s.remote.port)) {
-          if (externalPids.has(ownerPid)) {
-            isProxy = true;
-            break;
-          }
-        }
-      }
-      if (!isProxy) continue;
+      if (!proxyListenPorts.has(s.remote.port)) continue;
     }
 
     const key = `tcp:${s.pid}:${s.local.host}:${s.local.port}->${s.remote.host}:${s.remote.port}`;
@@ -356,13 +341,64 @@ export function parseMacNettopOutput(nettopText, lsofListenText = '', configured
   return { conns, pidCount: agyPids.size };
 }
 
+export function parseWindowsWorkerMessage(msg) {
+  const validStates = new Set(['active', 'admin_required', 'unavailable', 'starting', 'idle']);
+  const rawState = typeof msg?.status === 'string' ? msg.status : '';
+  const state = validStates.has(rawState) ? rawState : 'unavailable';
+  const activeConns = Math.max(0, Math.round(Number(msg?.activeConns || 0)) || 0);
+  const pidCount = Math.max(0, Math.round(Number(msg?.pidCount || 0)) || 0);
+  const upDelta = state === 'active' ? Number(msg?.upDelta ?? 0) : 0;
+  const downDelta = state === 'active' ? Number(msg?.downDelta ?? 0) : 0;
+  const error =
+    state === 'admin_required'
+      ? 'Administrator privileges required on Windows'
+      : state === 'unavailable'
+        ? String(msg?.error || 'Windows traffic worker unavailable')
+        : '';
+  return { state, activeConns, pidCount, upDelta, downDelta, error };
+}
+
+export function createProxyTrafficSampler() {
+  let previous = new Map();
+  let previousAt = null;
+  return (connections, sampledAt) => {
+    const current = new Map();
+    let upDelta = 0;
+    let downDelta = 0;
+    for (const row of connections) {
+      const name = String(row?.metadata?.processPath || row?.metadata?.process || '').split(/[\\/]/).pop();
+      if (!/^(antigravity|language_server)\.exe$/i.test(name)) continue;
+      const { id, start, upload, download } = row;
+      if (typeof id !== 'string' || !id || !Number.isSafeInteger(upload) || upload < 0 ||
+          !Number.isSafeInteger(download) || download < 0) continue;
+      const key = JSON.stringify([id, start]);
+      if (current.has(key)) continue;
+      const old = previous.get(key);
+      const openedAt = Date.parse(start);
+      const openedSinceSample = previousAt !== null && openedAt >= previousAt && openedAt <= sampledAt;
+      if (old) {
+        upDelta += Math.max(0, upload - old.upload);
+        downDelta += Math.max(0, download - old.download);
+      } else if (openedSinceSample) {
+        upDelta += upload;
+        downDelta += download;
+      }
+      current.set(key, { upload, download });
+    }
+    previous = current;
+    previousAt = sampledAt;
+    return { upDelta, downDelta, activeConns: current.size };
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Traffic archive + cross-platform monitor service
 // ---------------------------------------------------------------------------
 
 export function createTrafficMonitor(options = {}) {
   const stateDir = options.stateDir;
-  const archivePath = join(stateDir, 'traffic-archive.json');
+  const useProxy = process.platform === 'win32' && process.env.AGY_LEDGER_WINDOWS_TRAFFIC !== 'estats';
+  const archivePath = join(stateDir, useProxy ? 'proxy-traffic-archive.json' : 'traffic-archive.json');
   const nowFn = options.nowFn || (() => Date.now());
   const disableArchiveWrite = Boolean(options.disableArchiveWrite);
   const onDelta = typeof options.onDelta === 'function' ? options.onDelta : () => {};
@@ -382,10 +418,14 @@ export function createTrafficMonitor(options = {}) {
   let unixPrevByConn = new Map();
   let cachedListenText = '';
   let lastListenRefreshAt = 0;
+  let proxyPort = 0;
+  let configuredPort;
+  let nextDiscoveryAt = 0;
+  let sampleProxy = createProxyTrafficSampler();
 
   const backendName =
     process.platform === 'win32'
-      ? 'win-estats'
+      ? (useProxy ? 'win-proxy' : 'win-estats')
       : process.platform === 'darwin'
         ? 'macos-nettop'
         : process.platform === 'linux'
@@ -448,14 +488,15 @@ export function createTrafficMonitor(options = {}) {
 
   function recordDelta(upDelta, downDelta, tsMs = nowFn()) {
     loadIfNeeded();
-    const u = Number(upDelta || 0);
-    const d = Number(downDelta || 0);
+    const u = Number(upDelta ?? 0);
+    const d = Number(downDelta ?? 0);
     if (!Number.isFinite(u) || !Number.isFinite(d)) return false;
-    if (u <= 0 && d <= 0) return false;
+    if (u < 0 || d < 0) return false;
+    if (u === 0 && d === 0) return false;
     if (u > MAX_SINGLE_TICK_BYTES || d > MAX_SINGLE_TICK_BYTES) return false;
 
-    const safeU = Math.max(0, Math.round(u));
-    const safeD = Math.max(0, Math.round(d));
+    const safeU = Math.round(u);
+    const safeD = Math.round(d);
     if (safeU === 0 && safeD === 0) return false;
 
     const dt = new Date(tsMs);
@@ -487,13 +528,13 @@ export function createTrafficMonitor(options = {}) {
       seen.add(key);
       const prev = unixPrevByConn.get(key);
       if (prev) {
-        const dOut = cur.outBytes >= prev.outBytes ? cur.outBytes - prev.outBytes : cur.outBytes;
-        const dIn = cur.inBytes >= prev.inBytes ? cur.inBytes - prev.inBytes : cur.inBytes;
-        if (dOut < MAX_SINGLE_TICK_BYTES) upDelta += dOut;
-        if (dIn < MAX_SINGLE_TICK_BYTES) downDelta += dIn;
+        const dOut = cur.outBytes >= prev.outBytes ? cur.outBytes - prev.outBytes : 0;
+        const dIn = cur.inBytes >= prev.inBytes ? cur.inBytes - prev.inBytes : 0;
+        if (dOut <= MAX_SINGLE_TICK_BYTES) upDelta += dOut;
+        if (dIn <= MAX_SINGLE_TICK_BYTES) downDelta += dIn;
       } else if (unixBaselineDone) {
-        if (cur.outBytes < MAX_SINGLE_TICK_BYTES) upDelta += cur.outBytes;
-        if (cur.inBytes < MAX_SINGLE_TICK_BYTES) downDelta += cur.inBytes;
+        if (cur.outBytes <= MAX_SINGLE_TICK_BYTES) upDelta += cur.outBytes;
+        if (cur.inBytes <= MAX_SINGLE_TICK_BYTES) downDelta += cur.inBytes;
       }
       unixPrevByConn.set(key, { outBytes: cur.outBytes, inBytes: cur.inBytes });
     }
@@ -574,16 +615,18 @@ export function createTrafficMonitor(options = {}) {
         if (!line.startsWith('{')) continue;
         try {
           const msg = JSON.parse(line);
+          const parsed = parseWindowsWorkerMessage(msg);
           const prevState = status.state;
           status = {
             ...status,
-            state: msg.status === 'admin_required' ? 'admin_required' : 'active',
-            activeConns: Number(msg.activeConns || 0),
-            pidCount: Number(msg.pidCount || 0),
+            state: parsed.state,
+            activeConns: parsed.activeConns,
+            pidCount: parsed.pidCount,
             lastSampleAt: nowFn(),
-            error: msg.status === 'admin_required' ? 'Administrator privileges required on Windows' : '',
+            error: parsed.error,
           };
-          const recorded = recordDelta(msg.upDelta, msg.downDelta);
+          const recorded =
+            parsed.state === 'active' ? recordDelta(parsed.upDelta, parsed.downDelta) : false;
           if (!recorded && prevState !== status.state) {
             onDelta({ upDelta: 0, downDelta: 0, statusChanged: true });
           }
@@ -651,7 +694,96 @@ export function createTrafficMonitor(options = {}) {
     applyConnSnapshot(conns, pidCount);
   }
 
-  function startUnixPoller(pollFn, intervalMs) {
+  async function controllerGet(port, path) {
+    const token = configuredPort === port ? process.env.AGY_LEDGER_PROXY_TOKEN : '';
+    const response = await fetch(`http://127.0.0.1:${port}${path}`, {
+      signal: AbortSignal.timeout(900),
+      redirect: 'error',
+      headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+    });
+    if (!response.ok) throw new Error(`Proxy controller HTTP ${response.status}`);
+    return response.json();
+  }
+
+  async function discoverController(ports) {
+    const candidates = await Promise.allSettled(ports.map(async (port) => {
+      const info = await controllerGet(port, '/version');
+      if (typeof info?.version !== 'string' || !info.version) throw new Error('Invalid controller version');
+      const data = await controllerGet(port, '/connections');
+      if (!Array.isArray(data?.connections) &&
+          !(data?.connections === null && Number.isSafeInteger(data.uploadTotal))) {
+        throw new Error('Connection API unavailable');
+      }
+      return port;
+    }));
+    return candidates.find((candidate) => candidate.status === 'fulfilled')?.value;
+  }
+
+  async function findWindowsControllerPorts() {
+    const opts = { timeout: 2500, windowsHide: true };
+    const [{ stdout: processes }, { stdout: sockets }] = await Promise.all([
+      execFileAsync('tasklist.exe', ['/FO', 'CSV', '/NH'], opts),
+      execFileAsync('netstat.exe', ['-ano', '-p', 'TCP'], opts),
+    ]);
+    const pids = new Set();
+    for (const line of processes.split(/\r?\n/)) {
+      const match = line.match(/^"(?:sing-box|mihomo|verge-mihomo(?:-alpha)?|clash(?:-meta|-premium|-win64)?)\.exe"\s*,\s*"(\d+)"/i);
+      if (match) pids.add(match[1]);
+    }
+    const ports = new Set();
+    for (const line of sockets.split(/\r?\n/)) {
+      const match = line.match(/^\s*TCP\s+(?:127\.0\.0\.1|0\.0\.0\.0):(\d+)\s+0\.0\.0\.0:0\s+\S+\s+(\d+)\s*$/i);
+      if (match && pids.has(match[2])) ports.add(Number(match[1]));
+    }
+    return [...ports].filter((port) => !LOCAL_CONTROLLER_PORTS.includes(port)).slice(0, 12);
+  }
+
+  async function pollProxyOnce() {
+    const override = options.getProxyControllerPort?.() || 0;
+    if (configuredPort !== override) {
+      configuredPort = override;
+      proxyPort = 0;
+      nextDiscoveryAt = 0;
+      sampleProxy = createProxyTrafficSampler();
+    }
+    try {
+      if (!proxyPort) {
+        if (nowFn() < nextDiscoveryAt) return;
+        let found = await discoverController(override ? [override] : LOCAL_CONTROLLER_PORTS);
+        if (!found && !override && !stopped) {
+          found = await discoverController(await findWindowsControllerPorts());
+        }
+        if (stopped) return;
+        if (!found) throw new Error('Local proxy controller is unavailable');
+        proxyPort = found;
+      }
+      const sampledAt = nowFn();
+      const data = await controllerGet(proxyPort, '/connections');
+      if (stopped || (options.getProxyControllerPort?.() || 0) !== override) return;
+      const rows = data?.connections === null && Number.isSafeInteger(data.uploadTotal) ? [] : data?.connections;
+      if (!Array.isArray(rows)) throw new Error('Connection API unavailable');
+      if (rows.length && !rows.some((row) => row?.metadata?.processPath || row?.metadata?.process)) {
+        throw new Error('Proxy did not provide process names');
+      }
+      const { upDelta, downDelta, activeConns } = sampleProxy(rows, sampledAt);
+      const changed = status.state !== 'active' || status.activeConns !== activeConns || status.controllerPort !== proxyPort;
+      status = { ...status, state: 'active', activeConns, controllerPort: proxyPort, lastSampleAt: sampledAt, error: '' };
+      if (!recordDelta(upDelta, downDelta, sampledAt) && changed) onDelta({ statusChanged: true });
+    } catch (err) {
+      if (stopped) return;
+      const changed = status.state !== 'unavailable' || status.error !== err?.message;
+      status = {
+        ...status, state: 'unavailable', activeConns: 0, controllerPort: proxyPort || override,
+        error: err?.message || 'Proxy connection sample failed',
+      };
+      proxyPort = 0;
+      sampleProxy = createProxyTrafficSampler();
+      nextDiscoveryAt = nowFn() + 5000;
+      if (changed) onDelta({ statusChanged: true });
+    }
+  }
+
+  function startPoller(pollFn, intervalMs) {
     status = { ...status, state: 'starting', error: '' };
     const run = async () => {
       if (stopped || unixBusy) return;
@@ -674,12 +806,14 @@ export function createTrafficMonitor(options = {}) {
     if (started || stopped) return;
     started = true;
 
-    if (process.platform === 'win32') {
+    if (useProxy) {
+      startPoller(pollProxyOnce, PROXY_POLL_MS);
+    } else if (process.platform === 'win32') {
       startWindowsWorker();
     } else if (process.platform === 'darwin') {
-      startUnixPoller(pollMacOnce, MAC_POLL_MS);
+      startPoller(pollMacOnce, MAC_POLL_MS);
     } else if (process.platform === 'linux') {
-      startUnixPoller(pollLinuxOnce, LINUX_POLL_MS);
+      startPoller(pollLinuxOnce, LINUX_POLL_MS);
     } else {
       status = { ...status, state: 'unavailable', error: `Unsupported platform: ${process.platform}` };
     }

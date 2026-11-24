@@ -32,6 +32,13 @@
       pillOn: '显示',
       pillOff: '隐藏',
       trafficLabel: '进程流量',
+      proxyTrafficLabel: 'AGY 代理流量',
+      proxyPortLabel: '控制接口端口',
+      proxyPortAuto: '自动识别',
+      proxyPortSave: '保存',
+      proxyPaused: '采集暂停',
+      proxyNoProcess: '代理未提供进程信息',
+      proxyConnCount: (count) => `${count} 个 AGY 连接`,
       trafficActive: '运行中',
       trafficStarting: '启动中',
       trafficAdmin: '需管理员',
@@ -85,6 +92,12 @@
       trafficSum: '合计流量',
       trafficEmpty: '该时段暂无流量记录（安装后实时按日累计）',
       trafficBackendText: (st) => {
+        if (st.backend === 'win-proxy') {
+          const port = st.controllerPort ? ` · ${st.controllerPort}` : '';
+          const state = st.state === 'active' ? '运行中' : st.state === 'starting' ? '启动中' :
+            st.error === 'Proxy did not provide process names' ? '代理未提供进程信息' : '采集暂停';
+          return `AGY 代理流量${port} · ${state}`;
+        }
         const b =
           st.backend === 'win-estats'
             ? 'Windows 进程 TCP'
@@ -120,6 +133,13 @@
       pillOn: 'Show',
       pillOff: 'Hide',
       trafficLabel: 'Traffic',
+      proxyTrafficLabel: 'AGY proxy traffic',
+      proxyPortLabel: 'Controller port',
+      proxyPortAuto: 'Auto-detect',
+      proxyPortSave: 'Save',
+      proxyPaused: 'Paused',
+      proxyNoProcess: 'Process info unavailable',
+      proxyConnCount: (count) => `${count} AGY connections`,
       trafficActive: 'Active',
       trafficStarting: 'Starting',
       trafficAdmin: 'Admin req.',
@@ -175,6 +195,12 @@
       trafficSum: 'Total',
       trafficEmpty: 'No traffic recorded for this period yet',
       trafficBackendText: (st) => {
+        if (st.backend === 'win-proxy') {
+          const port = st.controllerPort ? ` · ${st.controllerPort}` : '';
+          const state = st.state === 'active' ? 'Active' : st.state === 'starting' ? 'Starting' :
+            st.error === 'Proxy did not provide process names' ? 'Process info unavailable' : 'Paused';
+          return `AGY proxy traffic${port} · ${state}`;
+        }
         const b =
           st.backend === 'win-estats'
             ? 'Windows TCP EStats'
@@ -649,7 +675,7 @@
             </span>
             ${
               st.state === 'active'
-                ? `<span class="tl-num">${esc(t.trafficMetaCount(st.pidCount || 0, st.activeConns || 0))}</span>`
+                ? `<span class="tl-num">${esc(st.backend === 'win-proxy' ? t.proxyConnCount(st.activeConns || 0) : t.trafficMetaCount(st.pidCount || 0, st.activeConns || 0))}</span>`
                 : ''
             }
           </div>`;
@@ -857,6 +883,7 @@
       const today = snap.today || {};
       const trafficSt = snap.trafficStatus || { state: 'idle', backend: '' };
       const trafficActive = trafficSt.state === 'active';
+      const proxyTraffic = trafficSt.backend === 'win-proxy';
       const p90 = getP90Cost();
 
       const viewMonthData = snap.months?.[ui.viewMonth] || {
@@ -883,7 +910,9 @@
             ? t.trafficStarting
             : trafficSt.state === 'admin_required'
               ? t.trafficAdmin
-              : t.trafficOff;
+              : proxyTraffic
+                ? (trafficSt.error === 'Proxy did not provide process names' ? t.proxyNoProcess : t.proxyPaused)
+                : t.trafficOff;
       const trafficDotCls =
         trafficSt.state === 'active' ? 'is-active' : trafficSt.state === 'admin_required' ? 'is-warn' : '';
 
@@ -908,9 +937,16 @@
               <button type="button" class="tl-pill-btn" data-action="toggle-widget">${esc(prefs.widgetVisible !== false ? t.pillOn : t.pillOff)}</button>
             </div>
             <div class="tl-pop-row">
-              <span>${esc(t.trafficLabel)}</span>
+              <span>${esc(proxyTraffic ? t.proxyTrafficLabel : t.trafficLabel)}</span>
               <span class="tl-pop-status"><span class="tl-status-dot ${trafficDotCls}"></span>${esc(trafficStateText)}</span>
             </div>
+            ${proxyTraffic ? `<form class="tl-pop-row tl-proxy-port">
+              <label>${esc(t.proxyPortLabel)}
+                <input name="port" type="number" min="1" max="65535" step="1" inputmode="numeric"
+                  value="${esc(prefs.proxyControllerPort ?? '')}" placeholder="${esc(t.proxyPortAuto)}">
+              </label>
+              <button type="submit" class="tl-pill-btn">${esc(t.proxyPortSave)}</button>
+            </form>` : ''}
             <div class="tl-pop-divider"></div>
             <div class="tl-pop-actions">
               <button type="button" class="tl-pill-btn" data-action="toggle-rates">${esc(t.rateCard)}</button>
@@ -1040,6 +1076,13 @@
           ${renderDetailDrawer(t)}
         </div>`;
     }
+
+    root.addEventListener('submit', (e) => {
+      if (!e.target.matches('.tl-proxy-port')) return;
+      e.preventDefault();
+      const value = e.target.elements.port.value;
+      patchPrefs({ proxyControllerPort: value === '' ? null : Number(value) });
+    });
 
     root.addEventListener('click', (e) => {
       const btn = e.target?.closest?.('[data-action]');
@@ -1210,7 +1253,7 @@
         ui.snapshot = nextSnap;
         ui.loading = false;
         ui.error = '';
-        if (nextSnap.rev !== prevRev) {
+        if (nextSnap.rev !== prevRev && !root.querySelector('.tl-proxy-port :focus')) {
           ensureInitialPeriod();
           render();
         }

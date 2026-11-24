@@ -10,6 +10,7 @@
  *   6. Minimalist plain-language copy, removed toggles, & theme-unified scrollbar verification
  */
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import { tmpdir } from 'node:os';
@@ -17,12 +18,35 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { calculateTurnBilling, resolveModelSpec } from './pricing.mjs';
 import { createLedgerCollector, sanitizePrefs, toLocalDateKey } from './collector.mjs';
-import { createTrafficMonitor, parseLinuxSsOutput, parseMacNettopOutput } from './traffic.mjs';
+import {
+  createProxyTrafficSampler,
+  createTrafficMonitor,
+  parseLinuxSsOutput,
+  parseMacNettopOutput,
+  parseWindowsWorkerMessage,
+} from './traffic.mjs';
 import { startLedgerServer } from './server.mjs';
 import { buildCdpRuntimeBundle } from './cdp_modal.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PLUGIN_ROOT = join(__dirname, '..', '..');
+
+{
+  const sample = createProxyTrafficSampler();
+  const row = (id, start, upload, processPath = 'C:\\AGY\\Antigravity.exe') => ({
+    id, start: new Date(start).toISOString(), upload, download: upload * 2, metadata: { processPath },
+  });
+  const first = row('existing', 100, 500);
+  assert.equal(sample([first], 1000).upDelta, 0);
+  const other = row('other', 1100, 1000, 'C:\\Browser\\chrome.exe');
+  const second = row('new', 1100, 25, 'C:\\AGY\\language_server.exe');
+  const late = row('late', 100, 300);
+  const rows = [{ ...first, upload: 510, download: 1020 }, second, other, late];
+  assert.deepEqual(sample(rows, 1200), { upDelta: 35, downDelta: 70, activeConns: 3 });
+  assert.equal(sample(rows, 1300).upDelta, 0);
+  assert.equal(sample([{ ...first, upload: 1, download: 2 }], 1400).upDelta, 0);
+  assert.equal(sample([{ ...first, upload: 3, download: 5 }], 1500).upDelta, 2);
+}
 
 function rgbToHsl(r, g, b) {
   const rn = r / 255;
@@ -259,6 +283,10 @@ function testTrafficParsersAndArchive(tempStateDir) {
     ' cubic bytes_sent:40000 bytes_received:12000',
     'ESTAB 0 0 127.0.0.1:50003 127.0.0.1:3000 users:(("Antigravity",pid=101,fd=12))',
     ' cubic bytes_sent:77777 bytes_received:66666',
+    'ESTAB 0 0 10.0.0.5:50010 93.184.216.34:443 users:(("node",pid=300,fd=15))',
+    ' cubic bytes_sent:12345 bytes_received:54321',
+    'ESTAB 0 0 [::ffff:127.0.0.1]:50011 [::ffff:127.0.0.1]:6758 users:(("Antigravity",pid=101,fd=16))',
+    ' cubic bytes_sent:88888 bytes_received:99999',
     'ESTAB 0 0 10.0.0.5:50004 142.250.1.1:443 users:(("language_server",pid=100,fd=13))',
     ' cubic bytes_sent:10000 bytes_received:5000',
     'ESTAB 0 0 127.0.0.1:50005 127.0.0.1:10808 users:(("chrome",pid=400,fd=14))',
@@ -303,13 +331,97 @@ function testTrafficParsersAndArchive(tempStateDir) {
   assert.equal(macOut, 12_000);
   assert.equal(macIn, 4_000);
 
-  // Persistence round-trip test
+  // Persistence round-trip & guard tests
   const tDir = mkdtempSync(join(tempStateDir, 'traffic-'));
   const fixedTs = new Date(2026, 10, 24, 15, 30, 0).getTime();
   const mon1 = createTrafficMonitor({ stateDir: tDir, nowFn: () => fixedTs });
-  mon1.recordDelta(1_500_000, 250_000, fixedTs);
-  mon1.recordDelta(500_000, 50_000, fixedTs);
+  assert.equal(mon1.recordDelta(-10, 100, fixedTs), false, 'Negative upDelta must be rejected');
+  assert.equal(mon1.recordDelta(100, -10, fixedTs), false, 'Negative downDelta must be rejected');
+  assert.equal(mon1.recordDelta(2 * 1024 * 1024 * 1024, 0, fixedTs), false, 'Over-cap delta must be rejected');
+  assert.equal(mon1.recordDelta(NaN, 100, fixedTs), false, 'NaN delta must be rejected');
+  assert.equal(mon1.recordDelta(1_500_000, 250_000, fixedTs), true);
+  assert.equal(mon1.recordDelta(500_000, 50_000, fixedTs), true);
   mon1.flush(true);
+
+  // Windows worker message validation: non-active status must never record traffic
+  const adminMsg = parseWindowsWorkerMessage({
+    status: 'admin_required',
+    upDelta: 999_999,
+    downDelta: 888_888,
+    activeConns: 7,
+    pidCount: 15,
+  });
+  assert.equal(adminMsg.state, 'admin_required');
+  assert.equal(adminMsg.upDelta, 0);
+  assert.equal(adminMsg.downDelta, 0);
+
+  const unknownMsg = parseWindowsWorkerMessage({ status: 'bogus', upDelta: 1234, downDelta: 5678 });
+  assert.equal(unknownMsg.state, 'unavailable');
+  assert.equal(unknownMsg.upDelta, 0);
+  assert.equal(unknownMsg.downDelta, 0);
+
+  const activeMsg = parseWindowsWorkerMessage({
+    status: 'active',
+    upDelta: 4096,
+    downDelta: 8192,
+    activeConns: 3,
+    pidCount: 2,
+  });
+  assert.equal(activeMsg.state, 'active');
+  assert.equal(activeMsg.upDelta, 4096);
+  assert.equal(activeMsg.downDelta, 8192);
+
+  // Windows EStats script static safety audit (prevent uninitialized ROD reads)
+  const winMonSrc = readFileSync(join(__dirname, 'win_tcp_monitor.ps1'), 'utf8');
+  assert.ok(winMonSrc.includes('Marshal.ReadByte(rwOutPtr)'), 'win_tcp_monitor.ps1 must verify Rw.EnableCollection');
+  assert.ok(winMonSrc.includes('ZeroBuffer(rodPtr'), 'win_tcp_monitor.ps1 must zero ROD buffer before every read');
+  assert.ok(winMonSrc.includes('IsRodSane('), 'win_tcp_monitor.ps1 must validate ROD segment/byte invariants');
+  assert.ok(winMonSrc.includes('IsIpv4MappedV6('), 'win_tcp_monitor.ps1 must detect ::ffff:127.x loopback sockets');
+  assert.ok(winMonSrc.includes('IsProcessElevated()'), 'win_tcp_monitor.ps1 must detect Windows elevation status');
+  assert.equal(
+    /GetPerTcp6?ConnectionEStats\([^)]*TcpConnectionEstatsData,\s*IntPtr\.Zero/.test(winMonSrc),
+    false,
+    'GetPerTcp[6]ConnectionEStats must never omit Rw output pointer'
+  );
+
+  // Live Windows worker smoke test (-Once)
+  if (process.platform === 'win32') {
+    const psExe = join(
+      process.env.SystemRoot || 'C:\\Windows',
+      'System32',
+      'WindowsPowerShell',
+      'v1.0',
+      'powershell.exe'
+    );
+    const out = execFileSync(
+      psExe,
+      [
+        '-NoProfile',
+        '-NonInteractive',
+        '-ExecutionPolicy',
+        'Bypass',
+        '-File',
+        join(__dirname, 'win_tcp_monitor.ps1'),
+        '-Once',
+      ],
+      { encoding: 'utf8', timeout: 20_000 }
+    );
+    const jsonLine = out
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .find((l) => l.startsWith('{'));
+    assert.ok(jsonLine, `Expected JSON output from win_tcp_monitor.ps1 -Once, got: ${out}`);
+    const sample = JSON.parse(jsonLine);
+    assert.equal(sample.upDelta, 0, 'First baseline tick must always emit upDelta === 0');
+    assert.equal(sample.downDelta, 0, 'First baseline tick must always emit downDelta === 0');
+    if (sample.elevated === false && sample.okConns === 0) {
+      assert.equal(
+        sample.status,
+        'admin_required',
+        'Unprivileged Windows process with 0 enabled EStats sockets must report admin_required'
+      );
+    }
+  }
 
   const mon2 = createTrafficMonitor({ stateDir: tDir, nowFn: () => fixedTs });
   const day = mon2.getDaysMap().get('2026-11-24');

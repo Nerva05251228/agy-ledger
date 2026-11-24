@@ -34,6 +34,7 @@ export const DEFAULT_PREFS = {
   theme: 'auto',
   widgetVisible: true,
   widgetPos: null,
+  proxyControllerPort: null,
 };
 
 // ---------------------------------------------------------------------------
@@ -270,6 +271,10 @@ export function sanitizePrefs(raw, base = DEFAULT_PREFS) {
   if (raw.lang === 'zh-CN' || raw.lang === 'en') out.lang = raw.lang;
   if (raw.theme === 'auto' || raw.theme === 'light' || raw.theme === 'dark') out.theme = raw.theme;
   if (typeof raw.widgetVisible === 'boolean') out.widgetVisible = raw.widgetVisible;
+  if (raw.proxyControllerPort === null ||
+      (Number.isInteger(raw.proxyControllerPort) && raw.proxyControllerPort >= 1 && raw.proxyControllerPort <= 65535)) {
+    out.proxyControllerPort = raw.proxyControllerPort;
+  }
   if (raw.widgetPos === null) {
     out.widgetPos = null;
   } else if (
@@ -374,6 +379,7 @@ export function createLedgerCollector(options = {}) {
   const archivePath = join(stateDir, 'ledger-archive.json');
 
   let prefsCache = null;
+  let prefsMtime = null;
   let archiveLoaded = false;
   let archiveMap = new Map(); // convId -> { convId, product, title, workspace, isSubagent, statKey, isArchived, turns }
   let archiveDirty = false;
@@ -390,6 +396,7 @@ export function createLedgerCollector(options = {}) {
     stateDir,
     nowFn,
     disableArchiveWrite,
+    getProxyControllerPort: () => readPrefs().proxyControllerPort,
     onDelta: () => {
       revCounter++;
       lastScanAt = 0;
@@ -400,27 +407,29 @@ export function createLedgerCollector(options = {}) {
   }
 
   function readPrefs() {
-    if (prefsCache) return prefsCache;
     try {
-      if (existsSync(prefsPath)) {
-        const parsed = JSON.parse(readFileSync(prefsPath, 'utf8'));
-        prefsCache = sanitizePrefs(parsed, DEFAULT_PREFS);
-        return prefsCache;
+      const modifiedAt = statSync(prefsPath, { throwIfNoEntry: false })?.mtimeMs ?? null;
+      if (prefsCache && prefsMtime === modifiedAt) return prefsCache;
+      if (modifiedAt !== null) {
+        prefsCache = sanitizePrefs(JSON.parse(readFileSync(prefsPath, 'utf8')), DEFAULT_PREFS);
+      } else {
+        prefsCache = { ...DEFAULT_PREFS };
       }
+      prefsMtime = modifiedAt;
     } catch {}
-    prefsCache = { ...DEFAULT_PREFS };
-    return prefsCache;
+    return prefsCache || { ...DEFAULT_PREFS };
   }
 
   function updatePrefs(patch) {
     const prev = readPrefs();
-    const next = sanitizePrefs({ ...prev, ...(patch || {}) }, DEFAULT_PREFS);
+    const next = sanitizePrefs(patch, prev);
     const changed = JSON.stringify(prev) !== JSON.stringify(next);
     prefsCache = next;
     if (changed) {
       revCounter++;
       try {
         atomicWriteJson(prefsPath, next);
+        prefsMtime = statSync(prefsPath).mtimeMs;
       } catch {}
       if (lastSnapshot) {
         lastSnapshot = { ...lastSnapshot, prefs: next, rev: String(revCounter) };
